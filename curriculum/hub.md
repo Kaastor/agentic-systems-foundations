@@ -88,6 +88,11 @@ Think: “broad but solid” + lots of hands-on.
 
 **Focus:** From chat loop to explicit graph.
 
+*   **The "Why": The Trap of the Implicit Loop**
+    *   *The Anti-Pattern:* The naive `while True:` loop where state lives in Python variables and the call stack.
+    *   *The Failure Mode:* Why you can't inspect, pause, or resume a standard Python loop without complex pickling.
+    *   *The Shift:* Moving state from "Stack Frames" (opaque) to "State Objects" (transparent).
+    
 * AgentState as a serializable object
 
   * `conversation_history`, `scratchpad`, `plan`, `tool_results`, `memory`, `metadata`, `step_index`, etc.
