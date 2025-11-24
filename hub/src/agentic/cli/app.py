@@ -8,7 +8,7 @@ import typer
 
 from agentic.config import settings
 from agentic.core.state import AgentStatus
-from agentic.steel_thread.runner import HumanDecision, load_state, run_steel_thread
+from agentic.main.runner import HumanDecision, load_state, run_steel_thread
 
 app = typer.Typer(help="Agentic Systems Foundations — steel-thread CLI")
 

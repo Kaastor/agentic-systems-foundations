@@ -13,10 +13,10 @@ from agentic.core.state import (
     ToolCallRecord,
     ToolErrorType,
 )
-from agentic.steel_thread.models import Email
-from agentic.steel_thread.policy import PolicyDecisionType
-from agentic.steel_thread.tools_email import ListInboxOutput
-from agentic.steel_thread.tools_rag import SearchDocsOutput
+from agentic.main.models import Email
+from agentic.main.policy import PolicyDecisionType
+from agentic.main.tools_email import ListInboxOutput
+from agentic.main.tools_rag import SearchDocsOutput
 
 
 def _make_idempotency_key(tool_name: str, args: Dict[str, Any]) -> str:

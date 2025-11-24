@@ -1,6 +1,6 @@
 from agentic.config import settings
 from agentic.core.state import AgentStatus
-from agentic.steel_thread.runner import run_steel_thread
+from agentic.main.runner import run_steel_thread
 
 
 def test_full_steel_thread_stub_succeeds():

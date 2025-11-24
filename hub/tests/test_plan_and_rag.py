@@ -1,6 +1,6 @@
 from agentic.core.tools import ToolRegistry
 from agentic.llm.stubs import RuleBasedLLM
-from agentic.steel_thread.tools_rag import build_rag_tool
+from agentic.main.tools_rag import build_rag_tool
 from agentic.config import settings
 
 

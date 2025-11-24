@@ -20,7 +20,7 @@ from agentic.core.state import (
 from agentic.core.tools import ToolRegistry
 from agentic.llm.groq_backend import GroqLLM
 from agentic.llm.stubs import RuleBasedLLM
-from agentic.steel_thread.nodes import (
+from agentic.main.nodes import (
     HumanReviewNode,
     NextStepNode,
     PlanningNode,
@@ -29,10 +29,10 @@ from agentic.steel_thread.nodes import (
     TerminalNode,
     ToolNode,
 )
-from agentic.steel_thread.policy import PolicyEngine
-from agentic.steel_thread.tools_calendar import build_calendar_tools
-from agentic.steel_thread.tools_email import build_email_tools
-from agentic.steel_thread.tools_rag import build_rag_tool
+from agentic.main.policy import PolicyEngine
+from agentic.main.tools_calendar import build_calendar_tools
+from agentic.main.tools_email import build_email_tools
+from agentic.main.tools_rag import build_rag_tool
 
 _LONG_TERM_MEMORY_PATH = settings.runs_dir / "long_term_memory.json"
 

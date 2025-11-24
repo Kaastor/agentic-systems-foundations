@@ -15,10 +15,10 @@ class Settings(BaseModel):
     """
 
     # For this teaching repo we assume you run from the project root,
-    # so the data lives under src/agentic/steel_thread/data.
+    # so the data lives under src/agentic/main/data.
     project_root: Path = Field(default_factory=lambda: Path.cwd())
     data_dir: Path = Field(
-        default_factory=lambda: Path.cwd() / "src" / "agentic" / "steel_thread" / "data"
+        default_factory=lambda: Path.cwd() / "src" / "agentic" / "main" / "data"
     )
     runs_dir: Path = Field(default_factory=lambda: Path.cwd() / "runs")
 
