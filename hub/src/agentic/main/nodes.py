@@ -283,8 +283,9 @@ class ToolNode(Node):
             state.failure_type = state.failure_type or FailureType.NON_HALTING
             state.scratchpad["tool_loop_detected"] = True
             plan.advance()
-            state.current_node = "summarize"
-            return state, f"Detected failing loop for {tool_name!r}; aborting further retries."
+            state.current_node = "self_check"
+            state.status = AgentStatus.RUNNING
+            return state, f"Detected failing loop for {tool_name!r}; handing off to self-check."
 
         decision = ctx.policy.check_tool_call(tool, raw_args, state)
 
@@ -300,6 +301,9 @@ class ToolNode(Node):
         if decision.decision == PolicyDecisionType.REQUIRE_HUMAN:
             # Park the tool call and go to the explicit HumanReviewNode.
             state.status = AgentStatus.AWAITING_USER
+            state.metrics["human_approvals_requested"] = state.metrics.get(
+                "human_approvals_requested", 0
+            ) + 1
             state.scratchpad["pending_tool_call"] = {
                 "tool_name": tool_name,
                 "args": raw_args,
@@ -354,6 +358,7 @@ class ToolNode(Node):
                 return state, f"Tool {tool_name!r} failed with error: {exc!r}"
 
         state.tool_calls.append(call_record)
+        state.metrics["tool_calls"] = float(len(state.tool_calls))
 
         # Feed tool outputs into scratchpad.
         if tool_name == "list_inbox":
