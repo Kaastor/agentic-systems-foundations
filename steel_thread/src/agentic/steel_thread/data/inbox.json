@@ -1,0 +1,41 @@
+{
+  "emails": [
+    {
+      "id": "e1",
+      "from_address": "ceo@example.com",
+      "to_address": "you@example.com",
+      "subject": "Welcome to the Agent project",
+      "body": "Hi,\\n\\nLooking forward to seeing the first prototype of our email triage agent.\\n\\nBest,\\nCEO",
+      "folder": "inbox",
+      "is_unread": true,
+      "tags": [
+        "info"
+      ]
+    },
+    {
+      "id": "e2",
+      "from_address": "alice@example.com",
+      "to_address": "you@example.com",
+      "subject": "Can we meet next week?",
+      "body": "Hey,\\n\\nI'd like to sync about the agent project. Could we meet for 30 minutes sometime next Tuesday or Wednesday afternoon?\\n\\nThanks,\\nAlice",
+      "folder": "inbox",
+      "is_unread": true,
+      "tags": [
+        "action_required"
+      ]
+    },
+    {
+      "id": "e3",
+      "from_address": "newsletter@tools.example.com",
+      "to_address": "you@example.com",
+      "subject": "Weekly tools newsletter",
+      "body": "A bunch of new tools launched this week...",
+      "folder": "inbox",
+      "is_unread": true,
+      "tags": [
+        "low_priority"
+      ]
+    }
+  ],
+  "sent": []
+}

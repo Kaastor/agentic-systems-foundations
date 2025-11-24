@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "agentic-systems-foundations"
+version = "0.1.0"
+description = "Steel-thread implementation for the Agentic Systems Foundations main course, backed by Groq or a local stub LLM."
+authors = ["Example Author <author@example.com>"]
+readme = "README.md"
+packages = [{ include = "agentic", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+typer = "^0.12.0"
+pydantic = "^2.7.0"
+requests = "^2.32.0"
+
+[tool.poetry.scripts]
+agentic = "agentic.cli.app:app"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
