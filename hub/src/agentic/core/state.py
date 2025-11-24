@@ -20,6 +20,24 @@ class Message(BaseModel):
     content: str
 
 
+class ToolErrorType(str, Enum):
+    """Lightweight error taxonomy for tool calls (Module 2 / 8)."""
+
+    TRANSIENT = "transient"
+    PERMANENT = "permanent"
+    VALIDATION = "validation"
+
+
+class FailureType(str, Enum):
+    """Workflow-level failure modes (Module 8)."""
+
+    WRONG_TOOL = "wrong_tool"
+    WRONG_ARGS = "wrong_args"
+    NON_HALTING = "non_halting"
+    SAFETY_VIOLATION = "safety_violation"
+    UNCLASSIFIED = "unclassified"
+
+
 class ToolCallRecord(BaseModel):
     """A single call to a tool and what happened."""
 
@@ -27,6 +45,8 @@ class ToolCallRecord(BaseModel):
     args: Dict[str, Any]
     result: Any | None = None
     error: str | None = None
+    error_type: ToolErrorType | None = None
+    idempotency_key: str | None = None
     success: bool = True
     started_at: datetime = Field(default_factory=datetime.utcnow)
     finished_at: datetime | None = None
@@ -67,7 +87,7 @@ class Plan(BaseModel):
 
 
 class Memory(BaseModel):
-    """Tiny memory sketch: summary + key facts + TODO list."""
+    """Tiny memory sketch: summary + key facts + TODO list (Module 5)."""
 
     summary: str = ""
     key_facts: Dict[str, str] = Field(default_factory=dict)
@@ -92,7 +112,7 @@ class AgentState(BaseModel):
     """Serializable snapshot of an agent run.
 
     This is the thing we persist to disk so we can pause/resume, debug, and
-    introspect. State machines, not call stacks.
+    introspect. State machines, not call stacks. (Module 3)
     """
 
     id: str = Field(default_factory=new_run_id)
@@ -105,13 +125,29 @@ class AgentState(BaseModel):
     current_node: str = "plan"
     step_index: int = 0
 
+    # Core "what happened in the conversation".
     conversation: List[Message] = Field(default_factory=list)
+
+    # Planning & tools.
     plan: Optional[Plan] = None
-    memory: Memory = Field(default_factory=Memory)
     tool_calls: List[ToolCallRecord] = Field(default_factory=list)
-    trace: List[TraceStep] = Field(default_factory=list)
+
+    # Memory & scratch.
+    memory: Memory = Field(default_factory=Memory)
     scratchpad: Dict[str, Any] = Field(default_factory=dict)
 
+    # Misc graph-level metadata and traces.
+    trace: List[TraceStep] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # Metrics and failure taxonomy (Module 8).
+    metrics: Dict[str, float] = Field(default_factory=dict)
+    failure_type: Optional[FailureType] = None
+
+    # Optional wake-up time for long-running reminders (Module 7).
+    wake_at: datetime | None = None
+
+    # Human-facing summary.
     result_summary: str | None = None
 
     def touch(self) -> None:

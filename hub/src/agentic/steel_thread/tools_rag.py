@@ -74,6 +74,8 @@ def build_rag_tool(docs_dir: Path) -> Tool:
             ),
             is_write=False,
             dangerous=False,
+            latency_class="medium",
+            permissions=["docs:read"],
         ),
         input_model=SearchDocsInput,
         output_model=SearchDocsOutput,

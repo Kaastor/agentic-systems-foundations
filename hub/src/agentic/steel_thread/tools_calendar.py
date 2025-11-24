@@ -33,12 +33,24 @@ class CreateEventOutput(BaseModel):
     event_id: str
 
 
+class SetReminderInput(BaseModel):
+    """Input for a tiny reminder tool (Module 7)."""
+
+    remind_in_days: int = 3
+    note: str = "Follow up on this thread."
+
+
+class SetReminderOutput(BaseModel):
+    reminder_id: str
+    wake_at: datetime
+
+
 class _CalendarStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            self.path.write_text(json.dumps({"events": []}, indent=2), encoding="utf-8")
+            self.path.write_text(json.dumps({"events": [], "reminders": []}, indent=2), encoding="utf-8")
 
     def _load(self) -> dict:
         return json.loads(self.path.read_text(encoding="utf-8"))
@@ -78,6 +90,20 @@ class _CalendarStore:
         )
         self._save(data)
         return event.id
+
+    def add_reminder(self, when: datetime, note: str) -> str:
+        data = self._load()
+        reminders = data.setdefault("reminders", [])
+        new_id = f"reminder-{len(reminders) + 1}"
+        reminders.append(
+            {
+                "id": new_id,
+                "wake_at": when.isoformat(),
+                "note": note,
+            }
+        )
+        self._save(data)
+        return new_id
 
 
 def _find_free_slots(store: _CalendarStore, inp: FindFreeSlotsInput) -> List[TimeSlot]:
@@ -135,12 +161,19 @@ def build_calendar_tools(calendar_path: Path) -> list[Tool]:
         store.add_event(event)
         return CreateEventOutput(event_id=new_id)
 
+    def set_reminder_func(inp: SetReminderInput) -> SetReminderOutput:
+        wake_at = datetime.utcnow() + timedelta(days=inp.remind_in_days)
+        reminder_id = store.add_reminder(wake_at, inp.note)
+        return SetReminderOutput(reminder_id=reminder_id, wake_at=wake_at)
+
     find_slots_tool = Tool[FindFreeSlotsInput, FindFreeSlotsOutput](
         metadata=ToolMetadata(
             name="find_free_slots",
             description="Find upcoming free calendar slots for the primary user.",
             is_write=False,
             dangerous=False,
+            latency_class="low",
+            permissions=["calendar:read"],
         ),
         input_model=FindFreeSlotsInput,
         output_model=FindFreeSlotsOutput,
@@ -153,10 +186,26 @@ def build_calendar_tools(calendar_path: Path) -> list[Tool]:
             description="Create a calendar event (side-effecting, requires approval).",
             is_write=True,
             dangerous=True,
+            latency_class="medium",
+            permissions=["calendar:write"],
         ),
         input_model=CreateEventInput,
         output_model=CreateEventOutput,
         func=create_event_func,
     )
 
-    return [find_slots_tool, create_event_tool]
+    set_reminder_tool = Tool[SetReminderInput, SetReminderOutput](
+        metadata=ToolMetadata(
+            name="set_reminder",
+            description="Set a basic reminder and record a wake-up time.",
+            is_write=True,
+            dangerous=False,
+            latency_class="low",
+            permissions=["reminder:write"],
+        ),
+        input_model=SetReminderInput,
+        output_model=SetReminderOutput,
+        func=set_reminder_func,
+    )
+
+    return [find_slots_tool, create_event_tool, set_reminder_tool]

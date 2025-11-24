@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List
 
-from agentic.core.state import Plan, PlanStep, AgentState
+from agentic.core.state import AgentState, Plan, PlanStep
 from agentic.core.tools import ToolMetadata
 from .base import LLM
 
@@ -46,6 +46,15 @@ class RuleBasedLLM(LLM):
                     id="create_event",
                     description="Create a calendar event for the proposed meeting slot.",
                     tool_name="create_event",
+                )
+            )
+
+        if "remind" in lower or "reminder" in lower:
+            steps.append(
+                PlanStep(
+                    id="set_reminder",
+                    description="Set a reminder to follow up in a few days.",
+                    tool_name="set_reminder",
                 )
             )
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 import requests
 from pydantic import BaseModel, ValidationError
@@ -11,6 +12,8 @@ from agentic.core.state import AgentState, Plan, PlanStep
 from agentic.core.tools import ToolMetadata
 from agentic.llm.base import LLM
 from agentic.llm.stubs import RuleBasedLLM
+
+logger = logging.getLogger("agentic.llm")
 
 
 class _PlanStepJSON(BaseModel):
@@ -30,6 +33,11 @@ class GroqLLM(LLM):
     This class keeps the integration deliberately small and explicit. It uses
     the `/chat/completions` endpoint and asks the model to emit JSON that we
     parse into the :class:`Plan` structure used by the rest of the system.
+
+    It also demonstrates:
+    - JSON-mode style `response_format` for the planner (Module 1).
+    - A tiny auto-retry loop around validation failures.
+    - Logging of raw prompts/responses for observability (Module 8).
     """
 
     api_key: str
@@ -38,38 +46,60 @@ class GroqLLM(LLM):
     timeout_seconds: int = 20
 
     def make_plan(self, user_message: str, tools: List[ToolMetadata]) -> Plan:
-        try:
-            raw = self._chat_completion(self._build_planner_messages(user_message, tools), temperature=0.2)
-            content = raw["choices"][0]["message"]["content"]
-            data = json.loads(content)
-            plan_json = _PlanJSON.model_validate(data)
-            steps: List[PlanStep] = []
-            known_tools = {t.name for t in tools}
-            for s in plan_json.steps:
-                tool_name = s.tool_name
-                if tool_name is not None and tool_name not in known_tools:
-                    tool_name = None
-                steps.append(
-                    PlanStep(
-                        id=s.id,
-                        description=s.description,
-                        tool_name=tool_name,
-                    )
+        messages = self._build_planner_messages(user_message, tools)
+        last_error: Exception | None = None
+
+        for attempt in range(2):
+            try:
+                raw = self._chat_completion(
+                    messages,
+                    temperature=0.2,
+                    top_p=0.2,
+                    max_tokens=512,
+                    response_format={"type": "json_object"},
                 )
-            if not steps:
-                raise ValueError("Model returned an empty plan.")
-            return Plan(steps=steps, current_index=0)
-        except (requests.RequestException, ValidationError, json.JSONDecodeError, KeyError, ValueError):
-            # Fall back to local deterministic planner so the rest of the
-            # system still works even if the network or model misbehaves.
-            fallback = RuleBasedLLM()
-            return fallback.make_plan(user_message, tools)
+                content = raw["choices"][0]["message"]["content"]
+                data = json.loads(content)
+                plan_json = _PlanJSON.model_validate(data)
+                steps: List[PlanStep] = []
+                known_tools = {t.name for t in tools}
+                for s in plan_json.steps:
+                    tool_name = s.tool_name
+                    if tool_name is not None and tool_name not in known_tools:
+                        tool_name = None
+                    steps.append(
+                        PlanStep(
+                            id=s.id,
+                            description=s.description,
+                            tool_name=tool_name,
+                        )
+                    )
+                if not steps:
+                    raise ValueError("Model returned an empty plan.")
+                return Plan(steps=steps, current_index=0)
+            except (requests.RequestException, ValidationError, json.JSONDecodeError, KeyError, ValueError) as exc:
+                last_error = exc
+                logger.warning("Planner attempt %s failed: %r", attempt + 1, exc)
+
+        logger.warning("Falling back to RuleBasedLLM after planner failure: %r", last_error)
+        # Fall back to local deterministic planner so the rest of the
+        # system still works even if the network or model misbehaves.
+        fallback = RuleBasedLLM()
+        return fallback.make_plan(user_message, tools)
 
     def summarize_run(self, state: AgentState) -> str:
+        messages = self._build_summary_messages(state)
         try:
-            raw = self._chat_completion(self._build_summary_messages(state), temperature=0.2)
+            raw = self._chat_completion(
+                messages,
+                temperature=0.5,
+                top_p=0.9,
+                max_tokens=256,
+                response_format=None,
+            )
             return raw["choices"][0]["message"]["content"].strip()
-        except (requests.RequestException, KeyError, json.JSONDecodeError):
+        except (requests.RequestException, KeyError, json.JSONDecodeError) as exc:
+            logger.warning("summarize_run failed, using RuleBasedLLM fallback: %r", exc)
             return RuleBasedLLM().summarize_run(state)
 
     # ---- helpers ----------------------------------------------------
@@ -80,23 +110,42 @@ class GroqLLM(LLM):
             "Content-Type": "application/json",
         }
 
-    def _chat_completion(self, messages: List[Dict[str, str]], temperature: float = 0.2) -> Dict[str, Any]:
+    def _chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.2,
+        top_p: float = 1.0,
+        max_tokens: int | None = None,
+        response_format: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
-        payload = {
+        payload: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
+            "top_p": top_p,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if response_format is not None:
+            payload["response_format"] = response_format
+
+        logger.info("llm_request payload=%s", json.dumps(payload, default=str))
         resp = requests.post(url, headers=self._headers(), json=payload, timeout=self.timeout_seconds)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        logger.info("llm_response payload=%s", json.dumps(data, default=str))
+        return data
 
     def _build_planner_messages(self, user_message: str, tools: List[ToolMetadata]) -> List[Dict[str, str]]:
         tool_lines = []
         for t in tools:
             kind = "WRITE" if t.is_write else "READ"
             danger = "DANGEROUS" if t.dangerous else "safe"
-            tool_lines.append(f"- {t.name} ({kind}, {danger}): {t.description}")
+            perms = ", ".join(t.permissions) if t.permissions else "no special permissions"
+            tool_lines.append(
+                f"- {t.name} ({kind}, {danger}, latency={t.latency_class}, perms={perms}): {t.description}"
+            )
         tool_block = "\n".join(tool_lines)
         allowed_tool_names = ", ".join(sorted(t.name for t in tools))
 
@@ -105,13 +154,14 @@ class GroqLLM(LLM):
             "Your job is to output a small JSON plan describing concrete steps using the "
             "available tools. The agent will later execute one tool per step. "
             "Respond with VALID JSON only, using this schema:\n\n"
-            "{\"steps\": [ {\"id\": \"short_id\", \"description\": \"what the step does\", "
-            "\"tool_name\": \"one of: " + allowed_tool_names + " or null\"} ] }\n\n"
+            '{"steps": [{"id": "short_id", "description": "what the step does", '
+            '"tool_name": "one of: ' + allowed_tool_names + ' or null"}]}\n\n'
             "Rules:\n"
             "- Use each tool at most once unless it clearly needs repetition.\n"
             "- Prefer simple, linear plans (1-5 steps).\n"
             "- If a tool is not needed, omit it entirely.\n"
             "- If scheduling is not requested, you can skip calendar tools.\n"
+            "- If you are unsure which tool to use, prefer a READ tool or skip the tool.\n"
             "- Do not add commentary or prose, only output JSON."
         )
 
@@ -141,6 +191,9 @@ class GroqLLM(LLM):
 
         tools_used = ", ".join({c.tool_name for c in state.tool_calls}) if state.tool_calls else "none"
 
+        self_check = state.scratchpad.get("self_check") or {}
+        self_check_str = json.dumps(self_check, default=str)
+
         system = (
             "You are a summariser for an email triage and scheduling agent. "
             "Write a short, clear summary suitable for showing to the end user. "
@@ -152,7 +205,8 @@ class GroqLLM(LLM):
             f"Final status: {state.status.value}\n\n"
             f"Tools used: {tools_used}\n\n"
             "Plan steps:\n"
-            f"{plan_desc}"
+            f"{plan_desc}\n\n"
+            f"Internal self-check info (JSON): {self_check_str}\n"
         )
 
         return [

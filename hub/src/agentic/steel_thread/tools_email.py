@@ -7,7 +7,7 @@ from typing import List
 from pydantic import BaseModel
 
 from agentic.core.tools import Tool, ToolMetadata
-from .models import Email
+from .models import Email, EmailTag
 
 
 class ListInboxInput(BaseModel):
@@ -50,12 +50,37 @@ class _EmailStore:
         emails = [Email(**e) for e in data.get("emails", [])]
         if only_unread:
             emails = [e for e in emails if e.is_unread]
-        emails.sort(key=lambda e: ("action_required" not in e.tags, e.subject))
+
+        def _priority_key(e: Email) -> tuple[bool, str]:
+            # Bring action_required mails to the top.
+            return (EmailTag.ACTION_REQUIRED not in e.tags, e.subject)
+
+        emails.sort(key=_priority_key)
         return emails
 
-    def send_email(self, to_address: str, subject: str, body: str, in_reply_to_id: str | None) -> str:
+    def send_email(
+        self,
+        to_address: str,
+        subject: str,
+        body: str,
+        in_reply_to_id: str | None,
+    ) -> str:
+        """Append to the 'sent' folder, with simple idempotency.
+
+        If we already sent an email with the same core fields, re-use the id.
+        This demonstrates idempotent write tools (Modules 2, 7).
+        """
         data = self._load()
         sent = data.setdefault("sent", [])
+        for existing in sent:
+            if (
+                existing.get("to_address") == to_address
+                and existing.get("subject") == subject
+                and existing.get("body") == body
+                and existing.get("in_reply_to_id") == in_reply_to_id
+            ):
+                return existing["id"]
+
         new_id = f"sent-{len(sent) + 1}"
         sent.append(
             {
@@ -66,7 +91,7 @@ class _EmailStore:
                 "body": body,
                 "folder": "sent",
                 "is_unread": False,
-                "tags": ["outgoing"],
+                "tags": [EmailTag.OUTGOING.value],
                 "in_reply_to_id": in_reply_to_id,
             }
         )
@@ -99,6 +124,8 @@ def build_email_tools(mailbox_path: Path) -> list[Tool]:
             description="List emails in the inbox, prioritising action-required messages.",
             is_write=False,
             dangerous=False,
+            latency_class="low",
+            permissions=["email:read"],
         ),
         input_model=ListInboxInput,
         output_model=ListInboxOutput,
@@ -111,6 +138,8 @@ def build_email_tools(mailbox_path: Path) -> list[Tool]:
             description="Send an email reply. This is side-effecting and requires human approval.",
             is_write=True,
             dangerous=True,
+            latency_class="medium",
+            permissions=["email:send"],
         ),
         input_model=SendEmailInput,
         output_model=SendEmailOutput,
