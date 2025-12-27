@@ -397,14 +397,32 @@ Now the “spin-offs” where each major concept gets the royal treatment.
    * Structured errors (`TransientError`, `PermanentError`, `ValidationError`).
    * Read vs write tools, logging & observability hooks.
 
-4. **Tool Orchestration, Concurrency & Caching**
+4. **CodeAct: Code as the Universal Action Interface**
+
+   * Beyond JSON function calling: using Python/Bash as the primary action language.
+   * Expressiveness advantages: loops, conditionals, exception handling in single execution.
+   * Self-correction through traceback feedback: agent sees and fixes errors directly.
+   * Consolidating tool libraries: using pandas/numpy/requests instead of hundreds of tiny specialized tools.
+   * Complex workflows without round-trip latency: multi-step scripts executed atomically.
+   * Tradeoffs: security considerations (code injection), sandboxing requirements, debugging complexity.
+   * When to use CodeAct vs structured function calls: task complexity, environment capabilities, safety requirements.
+
+5. **Tool Orchestration, Concurrency & Caching**
 
    * Tool registry/manifest with latency, permissions, categories.
    * Running tools in parallel vs serial order; when to choose which.
    * Timeouts, retries, backoff, rate-limiting.
    * Tool result caching and invalidation strategies.
 
-5. **Security for Tools & RAG**
+5. **Model Context Protocol (MCP) & Tool Standardization**
+
+   * MCP as an emerging standard for agent-tool integration (client-server architecture).
+   * Resources, Tools, and Prompts as first-class MCP primitives.
+   * Security benefits: credential isolation (OAuth flows handled by MCP server, not agent context).
+   * Practical MCP server implementation: exposing Google Drive, Slack, GitHub, etc.
+   * Connector patterns and lifecycle management for external integrations.
+
+6. **Security for Tools & RAG**
 
    * Avoiding injection into shell/SQL/HTTP.
    * Treating retrieved content as untrusted: no instruction-following.
@@ -449,10 +467,27 @@ Now the “spin-offs” where each major concept gets the royal treatment.
    * Contracts between agents (schemas + success criteria).
    * Narrow toolsets for workers; verifying worker outputs.
 
-6. **Reflection & Critique**
+6. **Parallel Agent Orchestration (Map-Reduce Patterns)**
+
+   * The "Fabrication Threshold" problem: quality degradation in sequential processing of large lists.
+   * Map-Reduce architecture for agents: decompose task → spawn isolated sub-agents → aggregate results.
+   * Shared-nothing execution: each sub-agent gets fresh context, preventing error propagation and "context fatigue".
+   * Use cases: research tasks (analyze 100 companies), batch processing, competitive analysis.
+   * Tradeoffs: increased token cost vs linear quality scaling and true parallelism.
+
+7. **Reflection & Critique**
 
    * Worker → critic → revised output loops.
    * Critic prompts and rubrics (quality, correctness, policy).
+
+8. **System 2 Thinking & Tree Search**
+
+   * Moving beyond greedy token generation: exploring multiple reasoning paths before committing.
+   * Monte Carlo Tree Search (MCTS) for agent decision-making: simulation, backpropagation, policy refinement.
+   * Reasoning tokens: internal monologue not shown to user, enabling explicit "thinking" traces.
+   * Self-verification and backtracking: detecting errors in reasoning and rewinding to earlier decision points.
+   * Pseudocode as intermediate representation: structured thinking before final code generation.
+   * Practical applications: complex coding tasks, mathematical reasoning, strategy planning.
 
 > Deepens: main course Modules 3 & 4 + related planning content from the full curriculum.
 
@@ -490,7 +525,17 @@ Now the “spin-offs” where each major concept gets the royal treatment.
    * Tombstoning and de-indexing RAG content.
    * Interaction with regulatory/compliance concerns.
 
-6. **Durable State & Long-Running Workflows**
+6. **Advanced Context Engineering & Cache Optimization**
+
+   * KV-Cache mechanics in Transformers: why prefix stability matters for cost and latency.
+   * Static prefix patterns: placing variable data (timestamps, user location) at the end to maximize cache hits.
+   * Deterministic serialization: ensuring identical state produces identical token sequences (sorted JSON keys).
+   * Logits masking: dynamically constraining model outputs (e.g., available tools) without modifying context.
+   * Recitation mechanisms: forcing the model to regenerate summaries/plans to "refresh" attention and prevent drift.
+   * Filesystem-as-memory: offloading large data to files, feeding only paths/metadata to context.
+   * Economic implications: cache-aware design can reduce costs by 10-100x in long-running sessions.
+
+7. **Durable State & Long-Running Workflows**
 
    * Persisting AgentState with versioning.
    * Combining memory with durable workflows (ties into long-running agents).
