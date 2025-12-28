@@ -532,14 +532,26 @@ Now the “spin-offs” where each major concept gets the royal treatment.
    * Worker → critic → revised output loops.
    * Critic prompts and rubrics (quality, correctness, policy).
 
-8. **System 2 Thinking & Tree Search**
+8. **Inference-Time Reasoning & Search Strategies**
 
-   * Moving beyond greedy token generation: exploring multiple reasoning paths before committing.
-   * Monte Carlo Tree Search (MCTS) for agent decision-making: simulation, backpropagation, policy refinement.
-   * Reasoning tokens: internal monologue not shown to user, enabling explicit "thinking" traces.
-   * Self-verification and backtracking: detecting errors in reasoning and rewinding to earlier decision points.
-   * Pseudocode as intermediate representation: structured thinking before final code generation.
-   * Practical applications: complex coding tasks, mathematical reasoning, strategy planning.
+   * **The "Thinking" Paradigm (Test-Time Compute)**
+     * Moving beyond immediate tool calls: forcing "latent reasoning" steps before action.
+     * Structuring the `<think>` block: implementing explicit reflection patterns before emitting JSON.
+     * Compute Budgeting: Trading latency for accuracy by scaling the number of reasoning tokens generated.
+     * Reasoning tokens: internal monologue not shown to user, enabling explicit "thinking" traces (o1/R1-style).
+   
+   * **Search-Based Policy Improvement**
+     * **Best-of-N (Rejection Sampling)**: Generate $N$ plans/tool-calls, use a lightweight verifier or reward model to pick the best one.
+     * **Tree Search (MCTS/BFS)**: Implementing "lookahead" where the agent simulates tool execution steps (in a sandbox) to value a path before committing.
+     * Monte Carlo Tree Search (MCTS) for agent decision-making: simulation, backpropagation, policy refinement.
+     * **Self-Correction Loops**: Detecting "stuck" states and pruning that branch of the reasoning tree.
+     * Self-verification and backtracking: detecting errors in reasoning and rewinding to earlier decision points.
+   
+   * **Practical Implementation Patterns**
+     * Pseudocode as intermediate representation: structured thinking before final code generation.
+     * Sandbox execution for safe tool simulation during lookahead.
+     * Balancing compute budget vs task complexity: when to invest in search vs direct execution.
+     * Applications: complex coding tasks, mathematical reasoning, multi-step planning, strategy optimization.
 
 > Deepens: main course Modules 3 & 4 + related planning content from the full curriculum.
 
@@ -746,6 +758,44 @@ Now the “spin-offs” where each major concept gets the royal treatment.
     * You keep human-readable artifacts (no “magic binary prompt” no one understands).
   * Treat optimized prompts as versioned artifacts in CI/CD.
 
+9. **Reward Modeling & Verifiers**
+
+**Goal:** Build the reward infrastructure required for RL-based agent alignment. Without robust verifiers, you cannot do RL for general agent tasks.
+
+* **Outcome-Based Rewards (ORM)**
+
+  * Binary success metrics: "Did the unit tests pass?" "Did the file exist?" "Did the API return 200?"
+  * Hard-coding verifiable outcomes for coding/data agents.
+  * Advantages: objective, deterministic, no model needed.
+  * Limitations: only works for tasks with executable validation.
+
+* **Process-Based Rewards (PRM)**
+
+  * Scoring the reasoning steps, not just the final answer.
+  * Using a stronger model (e.g., GPT-4o) to grade the traces of a smaller model (e.g., Llama-8B) to create a dataset.
+  * Annotating intermediate steps: which reasoning chains lead to correct vs incorrect outcomes.
+  * Advantages: catches errors in reasoning early, provides richer training signal.
+  * Challenges: requires step-level labels, expensive to generate at scale.
+
+* **Training a Verifier**
+
+  * Distilling the "Judge" into a small, fast classifier.
+  * Dataset construction: collect (trajectory, outcome) pairs from agent executions.
+  * Architecture choices: sequence classifiers, reward towers, fine-tuned embedding models.
+  * Using the Verifier to guide search (Module 8 of Spec C) rather than just for final eval.
+
+* **Verifiers in the Agent Loop**
+
+  * Integration patterns: post-tool verification, pre-commit approval, best-of-N selection.
+  * Failure handling: what to do when the verifier rejects all candidates.
+  * Human escalation: when automated verification is insufficient.
+
+* **Cross-Reference to Specialization H**
+
+  * Verifiers are the reward function for RL (see Spec H Module 7).
+  * The quality of your RL agent is bottlenecked by the quality of your verifier.
+
+
 > Deepens: main course **Module 8** and connects directly to model/experiment choices in **Specialization H**.
 
 
@@ -793,9 +843,9 @@ Now the “spin-offs” where each major concept gets the royal treatment.
 
 ---
 
-## Specialization H – Model Selection, Customization & Multi‑Model Systems
+## Specialization H – Model Selection, Fine-Tuning & Agent Alignment
 
-**Goal:** Choose and tune the models powering your agent system.
+**Goal:** Choose and tune the models powering your agent system. Master supervised fine-tuning (SFT) and reinforcement learning (RL) for agent-specific alignment.
 
 **Modules**
 
@@ -814,17 +864,103 @@ Now the “spin-offs” where each major concept gets the royal treatment.
    * Node-specific hyperparameters (temp, top_p, max_tokens).
    * Consistency vs diversity tradeoffs.
 
-4. **Fine-Tuning & LoRA (Conceptual)**
+4. **Fine-Tuning Fundamentals & LoRA**
 
-   * When prompts are not enough.
-   * Dataset design for schema adherence or domain style.
+   * When prompts are not enough: limits of in-context learning.
+   * Dataset design for schema adherence, domain style, and tool-calling behavior.
+   * LoRA (Low-Rank Adaptation): efficient fine-tuning without full parameter updates.
+   * Training infrastructure: compute requirements, dataset size considerations.
+   * Evaluation: measuring improvement on held-out agent tasks vs general capability degradation.
 
-5. **Reward Models & RL (High Level)**
+5. **Supervised Fine-Tuning (SFT) for Agents**
 
-   * Reward functions for agent behaviours.
-   * How RLHF-style setups relate to agent design.
+**Goal:** Move beyond generic LLM fine-tuning to agent-specific training patterns.
 
-6. **Experimentation with Models**
+   * **Format Formatting**
+
+     * Tuning models specifically to output your strict JSON schema or tool tokens.
+     * Skipping the "chat" fluff: training for direct, structured responses.
+     * Eliminating preambles, apologies, and verbose explanations in tool-calling contexts.
+     * Dataset creation: filtering successful agent traces for strict format adherence.
+
+   * **Cold Start Problem: Expert Iteration**
+
+     * Bootstrapping agent capability when you don't have training data yet.
+     * Process: Prompt a smart model (GPT-4o, Claude) to solve tasks → filter for success → SFT a smaller model on those traces.
+     * Iterative improvement: use the fine-tuned model to generate more data, repeat.
+     * Advantages: creates a task-specific model without manual labeling.
+     * Challenges: quality filtering, avoiding distribution collapse.
+
+   * **Thought Distillation**
+
+     * Distilling the "hidden thoughts" (CoT) of reasoning models (o1/R1) into smaller, faster agent models.
+     * Training on reasoning traces: model learns to generate internal monologue before tool calls.
+     * Preserving reasoning quality while reducing latency and cost.
+     * Techniques: curriculum learning (short to long chains), filtering for high-quality reasoning.
+
+   * **Agent-Specific Dataset Construction**
+
+     * Trajectory collection: logging successful agent executions in production.
+     * Negative examples: near-misses and failures with corrected versions.
+     * Balancing exploration vs exploitation in data collection.
+     * Version control for training datasets tied to schema/tool updates.
+
+6. **Reinforcement Learning for Agents**
+
+**Goal:** Train agents to optimize for task success using RL, going beyond supervised learning to handle complex, multi-step reasoning.
+
+   * **The RL Pipeline for Agents**
+
+     * **Environment**: The agent's execution context (tools, APIs, filesystem, databases).
+     * **Action Space**: Tool calls + text generation (reasoning tokens, user-facing responses).
+     * **Reward**: The output of the verifier (see Spec F Module 9).
+       * Sparse rewards: final task success/failure.
+       * Dense rewards: intermediate checkpoints, step-level verification.
+     * **Policy**: The agent model itself, trained to maximize expected reward.
+
+   * **GRPO (Group Relative Policy Optimization)**
+
+     * Why PPO is often too heavy for agent RL: requires a separate critic/value model, complex implementation.
+     * **DeepSeek's GRPO approach**: Sampling a group of outputs, ranking them by reward, optimizing the policy without a value network.
+     * Process:
+       1. Sample N trajectories from the current policy for each task.
+       2. Execute and score each trajectory with the verifier.
+       3. Rank trajectories by reward within each group.
+       4. Update policy to increase probability of higher-ranked trajectories.
+     * Advantages: simpler than PPO, no critic training, works well for discrete rewards.
+     * Hyperparameters: group size, temperature, KL penalty to prevent policy collapse.
+
+   * **Reasoning Alignment**
+
+     * Training models how to use the `<think>` block effectively (inference-time reasoning).
+     * Rewarding accurate reasoning chains, penalizing hallucinated or circular reasoning.
+     * Detecting and penalizing "looping thoughts": repetitive reasoning that doesn't progress.
+     * Teaching when to reason vs when to act: balancing compute budget with task complexity.
+     * Self-correction training: rewarding trajectories that detect and fix their own errors.
+
+   * **Online vs Offline RL**
+
+     * **Offline RL**: Learning from "gold" trajectories collected beforehand.
+       * Advantages: safer, no exploration risk in production.
+       * Dataset: expert demonstrations, filtered successful executions.
+       * Challenges: distribution mismatch, limited coverage of edge cases.
+
+     * **Online RL**: Learning by interacting with tools and getting feedback in real-time.
+       * Exploration in production: agent tries new strategies, learns from failures.
+       * Feedback sources: compiler errors, API errors, unit test results, user corrections.
+       * Advantages: discovers novel solutions, adapts to changing environments.
+       * Risks: potential for failures in production, requires safety guardrails.
+
+     * **Hybrid Approaches**: Start with offline RL on expert data, gradually introduce online learning with safety constraints.
+
+   * **Practical Considerations**
+
+     * Compute requirements: RL is expensive, budget accordingly.
+     * Safety during training: sandbox environments, human oversight for critical tasks.
+     * Evaluation: measuring generalization to truly novel tasks, avoiding overfitting to training distribution.
+     * When RL is worth it vs when SFT + prompt engineering suffices.
+
+7. **Experimentation with Models**
 
    * Comparing model variants on eval suites.
    * Deciding whether the fix is: model, prompt, graph, or tools.
@@ -882,12 +1018,12 @@ Now the “spin-offs” where each major concept gets the royal treatment.
 * **Tool layer, RAG-as-tool, registries, concurrency, caching, security** → Main Module 2 + Specialization B.
 * **Memory, long-term state, summaries, personas, forgetting** → Main Module 5 + Specialization D.
 * **Guardrails, policy checks, self-checks, loops, safety models, prompt injection** → Main Module 6 + Specialization E.
-* **Planning, hierarchical agents, reflection, plan repair** → Main Module 4 + Specialization C.
+* **Planning, hierarchical agents, reflection, plan repair, inference-time reasoning, search strategies** → Main Module 4 + Specialization C.
 * **Long-running workflows, pause/resume, idempotent restarts, queues** → Main Module 7 + Specialization D + G.
-* **Eval, testing, metrics, failure taxonomy, time-travel debugging, offline/online eval, human eval** → Main Module 8 + Specialization F.
+* **Eval, testing, metrics, failure taxonomy, time-travel debugging, offline/online eval, human eval, reward modeling & verifiers** → Main Module 8 + Specialization F.
 * **Threat modelling, privacy, governance, least privilege** → Main Module 6/9 + Specialization E.
 * **Infra, CI/CD, config, feature flags, deployment** → Main Module 9 + Specialization G.
-* **Model selection, multi-model architectures, fine-tuning, experiments** → Main Modules 1 & 9 + Specialization H.
+* **Model selection, multi-model architectures, SFT for agents, RL/GRPO, reasoning alignment, experiments** → Main Modules 1 & 9 + Specialization H.
 * **UX, human approval, productization** → Main Modules 9–10 + Specialization I.
 
 
