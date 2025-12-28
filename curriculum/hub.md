@@ -379,25 +379,77 @@ Now the “spin-offs” where each major concept gets the royal treatment.
 
 **Modules**
 
-1. **RAG Pipeline Fundamentals**
+1. **RAG Fundamentals & Structural Failure Modes**
 
-   * Chunking strategies, embeddings, classical retrieval (BM25) vs vector.
-   * Index design, metadata, and filters.
-   * Retrieval hyperparameters (k, similarity thresholds).
+   * Traditional pipeline: chunking strategies, embeddings, BM25 vs vector retrieval.
+   * Index design, metadata filtering, retrieval hyperparameters (k, similarity thresholds).
+   * **Structural limitations of vanilla RAG:**
+     * Approximate retrieval: semantic similarity ≠ entailment; embeddings are lossy.
+     * Chunk boundary pathology: facts split across chunks, decontextualized snippets.
+     * Model misuse of evidence: ignoring, distorting, or hallucinating despite correct chunks.
+     * Security: retrieved text as untrusted input (indirect prompt injection risk).
+   * **When RAG is the wrong choice**: decision framework for structured vs unstructured knowledge.
 
-2. **RAG as a First-Class Tool**
+2. **Beyond Vanilla RAG: Modern Grounding Strategies**
+
+   * **Cache-Augmented Generation (CAG)**: when corpus is bounded (course materials, APIs, policy docs).
+     * Preload entire corpus into context once, reuse KV cache across queries.
+     * Eliminates retrieval selection errors entirely; corpus as versioned, compiled artifact.
+     * Tradeoffs: corpus size limits, cache regeneration on updates, model errors remain.
+     * Killer use cases: syllabi, rubrics, certification handbooks, API documentation.
+   
+   * **DB/Tool-Grounded Systems**: replacing fuzzy text retrieval with authoritative structured queries.
+     * SQL databases (grades, deadlines, rosters), knowledge graphs, rule engines, symbolic tools.
+     * LLM as translator/controller: question → structured query → execute → present.
+     * Provable correctness through schemas, constraints, deterministic computation.
+     * Educational gold: "What's my grade?", "What's due?", "Why did tests fail?" → structured, not retrieved.
+   
+   * **GraphRAG**: graph-structured summaries for interconnected, narrative corpora.
+     * Entity extraction, relationship graphs, community detection, multi-hop reasoning.
+     * Retrieves connected context, not just top-k similar chunks.
+     * Use cases: institutional policies, procedural knowledge, messy interconnected documents.
+     * Limitations: still text-based, inherits injection risks and extraction errors.
+   
+   * **Self-RAG & Adaptive Retrieval**: retrieve-generate-critique loops.
+     * Agent decides when to retrieve vs rely on internal knowledge.
+     * Self-verification of retrieved evidence relevance and sufficiency.
+     * Reducing unsupported answers through explicit critique nodes.
+   
+   * **Reliability gradient & decision framework:**
+     * Tier 1: Deterministic tools/DB queries (highest correctness guarantees).
+     * Tier 2: CAG for static, bounded text corpora (eliminates retrieval errors).
+     * Tier 3: GraphRAG/structured retrieval for complex unstructured corpora.
+     * Tier 4: Vanilla RAG (fastest to build, easiest to get wrong).
+     * Orthogonal: verification (tests, solvers, cross-checks) tolerates upstream fuzz.
+   
+   * **Agentic Context Construction**: dynamic, tool-driven grounding (the Manus approach).
+     * Beyond static retrieval (RAG) and full-corpus loading (CAG): agent as active researcher.
+     * Process: small initial context → tool-based search/browse → read & evaluate → discard useless / keep relevant → follow links → iterate.
+     * The agent builds its own context intelligently based on what it learns, not blind math or bulk loading.
+     * Ties together: filesystem-as-memory (Spec D), tool orchestration, CodeAct (Spec B), state machines (Spec C).
+     * Use cases: complex research tasks, interconnected knowledge bases requiring synthesis, exploratory analysis.
+     * Tradeoffs: requires full agentic capabilities (tools, planning, state), multiple LLM calls, but scales better than CAG and achieves higher accuracy than RAG for complex queries.
+   
+   * **The Three-Way Decision Framework:**
+     * **Use CAG** when: corpus is bounded, mostly static, fits in context window (syllabi, rubrics, API docs, certification handbooks).
+     * **Use RAG** when: corpus is massive (TB+), individual queries are simple/isolated (FAQ lookup, basic keyword search).
+     * **Use Agentic Context** when: corpus is large but interconnected, task requires synthesis across distant sources, or highest accuracy is required and agent infrastructure is available.
+
+3. **RAG as a First-Class Tool (Implementation Patterns)**
 
    * API design: `search_docs(query, k) -> [DocumentHit]`.
    * DocumentHit schema: `id`, `snippet`, `score`, `source`, `metadata`.
    * Structured integration into AgentState (not just appending text).
+   * Adaptive retrieval: agent decides when/whether to call search_docs.
+   * Evidence tracking and citation: linking generated text back to source documents.
 
-3. **Tool Layer Design**
+4. **Tool Layer Design**
 
    * Wrappers with input validation and idempotency.
    * Structured errors (`TransientError`, `PermanentError`, `ValidationError`).
    * Read vs write tools, logging & observability hooks.
 
-4. **CodeAct: Code as the Universal Action Interface**
+5. **CodeAct: Code as the Universal Action Interface**
 
    * Beyond JSON function calling: using Python/Bash as the primary action language.
    * Expressiveness advantages: loops, conditionals, exception handling in single execution.
@@ -407,14 +459,14 @@ Now the “spin-offs” where each major concept gets the royal treatment.
    * Tradeoffs: security considerations (code injection), sandboxing requirements, debugging complexity.
    * When to use CodeAct vs structured function calls: task complexity, environment capabilities, safety requirements.
 
-5. **Tool Orchestration, Concurrency & Caching**
+6. **Tool Orchestration, Concurrency & Caching**
 
    * Tool registry/manifest with latency, permissions, categories.
    * Running tools in parallel vs serial order; when to choose which.
    * Timeouts, retries, backoff, rate-limiting.
    * Tool result caching and invalidation strategies.
 
-5. **Model Context Protocol (MCP) & Tool Standardization**
+7. **Model Context Protocol (MCP) & Tool Standardization**
 
    * MCP as an emerging standard for agent-tool integration (client-server architecture).
    * Resources, Tools, and Prompts as first-class MCP primitives.
@@ -422,7 +474,7 @@ Now the “spin-offs” where each major concept gets the royal treatment.
    * Practical MCP server implementation: exposing Google Drive, Slack, GitHub, etc.
    * Connector patterns and lifecycle management for external integrations.
 
-6. **Security for Tools & RAG**
+8. **Security for Tools & RAG**
 
    * Avoiding injection into shell/SQL/HTTP.
    * Treating retrieved content as untrusted: no instruction-following.
@@ -610,7 +662,22 @@ Now the “spin-offs” where each major concept gets the royal treatment.
    * Expected terminal states / side-effects.
    * Monte Carlo / fuzz tests with noisy LLM outputs and tool failures.
 
-3. **Failure Taxonomies & Metrics**
+3. **Comparative Grounding Strategy Evaluation ("Needle in Haystack" Lab)**
+
+   * **Goal**: Empirically compare RAG vs CAG vs Agentic Context Construction on real-world tasks.
+   * **Dataset**: Medium-to-large corpus (codebase, course materials, policy documents).
+   * **Test design**: Questions requiring synthesis across distant sections (cross-module understanding, multi-hop reasoning).
+   * **Three approaches:**
+     * **Task A (Vanilla RAG)**: Use vector retrieval (LangChain + embeddings) to answer cross-document questions.
+       * Expected result: Often fails or gives generic answers when relevant chunks don't share keywords.
+     * **Task B (CAG/Long Context)**: Load entire corpus into long-context model (Gemini 1.5, Claude 3.5).
+       * Expected result: Usually succeeds due to global understanding, finds "needles" consistently.
+     * **Task C (Agentic Context)**: Use autonomous agent (Manus, custom agentic system) to dynamically construct context.
+       * Expected result: Most grounded answer, may run verification scripts or follow dependency chains.
+   * **Metrics**: Accuracy, cost (tokens), latency, citation quality, handling of edge cases.
+   * **Learning outcomes**: Students understand cost-accuracy-scale tradeoffs, learn when each approach is appropriate.
+
+4. **Failure Taxonomies & Metrics**
 
    * Taxonomy of agent failures (wrong tool, wrong args, non-halting, safety, loops).
    * Quantitative metrics and dashboards.
