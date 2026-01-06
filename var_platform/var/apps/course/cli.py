@@ -12,13 +12,16 @@ from pathlib import Path
 
 from ...agent.orchestrator import Toolbox, VAROrchestrator
 from ...config import RuntimeConfig
-from ...io import CLISessionIO
+from ..common.cli_io import CLIIO
 from ...store.exercise_store import ExerciseStore
 from ...store.trace_store import FileTraceStore
+from ...memory.store import FileMemoryStore
 from ...tools.exercise_generation import CompileDraftTool, GenerateDraftTool, available_specs
 from ...tools.grading import GradeSubmissionTool
 from ...tools.hinting import MakeHintTool
 from ...tools.observability import TraceLogTool
+from ...tools.presentation_gate import GateExerciseViewTool, GateGradeReportTool, GateHintTool
+from ...tools.memory import MemoryAppendTool, MemoryQueryTool
 from ...tools.sandbox import SandboxRunner
 from ...tools.verification import ExerciseVerifyTool
 
@@ -26,6 +29,7 @@ from ...tools.verification import ExerciseVerifyTool
 def build_course_orchestrator(*, root: Path) -> VAROrchestrator:
     store = ExerciseStore(root)
     trace_store = FileTraceStore(root)
+    memory_store = FileMemoryStore(root / "memory")
     sandbox = SandboxRunner()
 
     tools = Toolbox(
@@ -34,7 +38,12 @@ def build_course_orchestrator(*, root: Path) -> VAROrchestrator:
         verify=ExerciseVerifyTool(sandbox),
         grade=GradeSubmissionTool(store, sandbox),
         hint=MakeHintTool(store),
+        gate_exercise_view=GateExerciseViewTool(),
+        gate_grade_report=GateGradeReportTool(),
+        gate_hint=GateHintTool(),
         trace_log=TraceLogTool(trace_store),
+        memory_append=MemoryAppendTool(memory_store),
+        memory_query=MemoryQueryTool(memory_store),
     )
     return VAROrchestrator(config=RuntimeConfig(), store=store, tools=tools)
 
@@ -49,7 +58,7 @@ def main(argv: list[str] | None = None) -> None:
 
     orchestrator = build_course_orchestrator(root=args.root)
     specs = available_specs(seed=args.seed)
-    io = CLISessionIO()
+    io = CLIIO()
     final_state = orchestrator.run_session(io=io, specs=specs)
 
     # Minimal summary

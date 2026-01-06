@@ -1,26 +1,8 @@
-"""Verified Agent Runtime (VAR) package.
+"""Verified Agent Runtime (VAR).
 
-This package intentionally resembles production code, but stays small enough for lab work.
+`var.api` defines the supported public surface.
 """
 
-from .types import (
-    AgentState,
-    ExerciseArtifact,
-    ExerciseSpec,
-    GradeReport,
-    HintArtifact,
-    HintPolicy,
-    Submission,
-    VerificationReport,
-)
+from .api import *  # noqa: F403
 
-__all__ = [
-    "AgentState",
-    "ExerciseArtifact",
-    "ExerciseSpec",
-    "GradeReport",
-    "HintArtifact",
-    "HintPolicy",
-    "Submission",
-    "VerificationReport",
-]
+from .api import __all__  # noqa: F401

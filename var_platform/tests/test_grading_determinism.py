@@ -31,5 +31,9 @@ class TestGradingDeterminism(unittest.TestCase):
             g1 = grader.run(submission=sub, constraints=spec.constraints).result
             g2 = grader.run(submission=sub, constraints=spec.constraints).result
 
-            self.assertEqual(g1.model_dump(mode="json"), g2.model_dump(mode="json"))
+            d1 = g1.model_dump(mode="json")
+            d2 = g2.model_dump(mode="json")
+            d1.pop("runtime_ms", None)
+            d2.pop("runtime_ms", None)
+            self.assertEqual(d1, d2)
             self.assertTrue(g1.passed)

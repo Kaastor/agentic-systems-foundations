@@ -10,8 +10,9 @@ from var.tools.exercise_generation import CompileDraftTool, GenerateDraftTool, a
 from var.tools.grading import GradeSubmissionTool
 from var.tools.hinting import MakeHintTool
 from var.tools.observability import TraceLogTool
+from var.tools.presentation_gate import GateExerciseViewTool, GateGradeReportTool, GateHintTool
 from var.tools.sandbox import SandboxRunner
-from var.types import VerificationReport, VerificationStatus
+from var.types import Outcome, OutcomeKind, VerificationReport, VerificationStatus
 from var.tools.base import Tool, ToolResult
 
 
@@ -21,14 +22,14 @@ class AlwaysFailVerifyTool(Tool):
 
     def run(self, *, artifact, constraints, repeats: int = 2):
         return ToolResult.success(
-            VerificationReport(
+            Outcome.fail(kind=OutcomeKind.Fail, value=VerificationReport(
                 artifact_id=artifact.artifact_id,
                 status=VerificationStatus.FAIL,
                 checks=[],
                 execution_reports=[],
                 failure_reason="forced",
                 repair_hint="forced",
-            )
+            ), reason="forced")
         )
 
 
@@ -72,6 +73,9 @@ class TestLoopBounds(unittest.TestCase):
                 verify=AlwaysFailVerifyTool(),  # force failure
                 grade=GradeSubmissionTool(store, sandbox),
                 hint=MakeHintTool(store),
+                gate_exercise_view=GateExerciseViewTool(),
+                gate_grade_report=GateGradeReportTool(),
+                gate_hint=GateHintTool(),
                 trace_log=TraceLogTool(trace_store),
             )
 

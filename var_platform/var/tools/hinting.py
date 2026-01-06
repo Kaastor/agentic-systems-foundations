@@ -87,7 +87,7 @@ class MakeHintTool(Tool):
         attempt_index: int,
     ) -> ToolResult[HintArtifact]:
         artifact = self._store.get(grade.artifact_id)
-        fn = _first_top_level_function_name(artifact.reference_solution) or "unknown"
+        fn = _first_top_level_function_name(artifact.reference_solution.get_secret_value()) or "unknown"
 
         safe_level = max(1, min(int(hint_level), policy.max_hint_level))
 

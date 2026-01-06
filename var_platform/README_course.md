@@ -8,6 +8,11 @@ This **Course Edition** intentionally focuses on the **core kernel**. It avoids 
 
 ## The core idea (the steel beam)
 
+Two big teaching upgrades:
+- **Outcomes are first-class** (`OutcomeKind`) so the FSM branches on *domain results*, not just “tool ran”.
+- **PresentationGate is universal**: exercise, grade, and hint are all gated before being shown.
+
+
 **Invariant (must never break):** an exercise is only shown to the learner if it has been **verified PASS** in a sandbox.
 
 The loop:
@@ -38,12 +43,12 @@ pip install -e .
 
 ### Run the course CLI
 ```bash
-vpl-course
+var-course
 # or:
-python -m vpl.apps.course.cli
+python -m var.apps.course.cli
 ```
 
-Artifacts for the course run are written under **`.vpl_course/`** by default.
+Artifacts for the course run are written under **`.var_course/`** by default.
 
 ### Run tests
 ```bash
@@ -70,37 +75,37 @@ This codebase is designed so students can “own a slice” without rewriting ev
 ## Recommended reading order (for teaching)
 
 1. **Data models (schemas)**
-   - `vpl/types.py`
+   - `var/types.py`
 
 2. **Tool protocol (system boundary)**
-   - `vpl/tools/base.py`
+   - `var/tools/base.py`
 
 3. **Sandbox execution**
-   - `vpl/tools/sandbox.py`
+   - `var/tools/sandbox.py`
 
 4. **Exercise generation (templates)**
-   - `vpl/tools/exercise_generation.py`
+   - `var/tools/exercise_generation.py`
 
 5. **Verification gate**
-   - `vpl/tools/verification.py`
+   - `var/tools/verification.py`
 
 6. **Grading (hidden tests + sanitization)**
-   - `vpl/tools/grading.py`
+   - `var/tools/grading.py`
 
 7. **Orchestration (explicit FSM + budgets + loop controls)**
-   - `vpl/agent/orchestrator.py`
-   - `vpl/agent/tool_executor.py`
+   - `var/agent/orchestrator.py`
+   - `var/agent/tool_executor.py`
 
 8. **Observability**
-   - `vpl/tools/observability.py`
-   - `vpl/store/trace_store.py`
+   - `var/tools/observability.py`
+   - `var/store/trace_store.py`
 
 ---
 
 ## Where to make changes (safe extension seams)
 
 ### Add a new exercise template
-- Add a template in `vpl/tools/exercise_generation.py`
+- Add a template in `var/tools/exercise_generation.py`
 - Ensure it compiles to `ExerciseArtifact` with:
   - starter code
   - reference solution
@@ -109,14 +114,14 @@ This codebase is designed so students can “own a slice” without rewriting ev
 Then verify: reference solution must pass hidden tests under the sandbox.
 
 ### Add new verification checks
-- Add checks in `vpl/tools/verification.py` (e.g., stronger signature checks, style constraints, import restrictions)
+- Add checks in `var/tools/verification.py` (e.g., stronger signature checks, style constraints, import restrictions)
 
 ### Improve loop/repair logic
-- Modify `RepairOrRegenerate` logic in `vpl/agent/orchestrator.py`
+- Modify `RepairOrRegenerate` logic in `var/agent/orchestrator.py`
 - Keep it **bounded** (no infinite regen loops)
 
 ### Improve hinting (without leaking)
-- Extend the hint ladder in `vpl/tools/hinting.py`
+- Extend the hint ladder in `var/tools/hinting.py`
 - Enforce “no solution reveal” unless policy explicitly allows it
 
 ---
@@ -146,7 +151,6 @@ It is **not** a hardened container/VM sandbox. Do not treat it as safe against f
 
 - The verification invariant never breaks
 - Unit tests pass
-- Grading is deterministic (same submission → same GradeReport)
+- Grading is deterministic in outcome (same submission → same pass/fail, score, and test results)
 - Hidden tests and reference solutions never leak to the learner
 - Changes are modular and come with tests
-

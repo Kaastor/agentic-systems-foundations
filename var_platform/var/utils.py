@@ -97,3 +97,15 @@ def signature_matches(spec: SignatureSpec, sig: FunctionSignature) -> bool:
 def render_signature_stub(spec: SignatureSpec) -> str:
     args = ", ".join([a.name for a in spec.args])
     return f"def {spec.name}({args}):"
+
+
+
+def safe_format(template: str, variables: dict) -> str:
+    """Deterministic prompt formatting.
+
+    Uses Python's str.format_map; raises KeyError if a variable is missing.
+    """
+    class _Missing(dict):
+        def __missing__(self, key):
+            raise KeyError(key)
+    return template.format_map(_Missing(**variables))

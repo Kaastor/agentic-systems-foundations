@@ -44,22 +44,29 @@ pip install -e .
 
 ## Run the deterministic benchmark suite
 
+A smaller, sharper suite that targets failure modes:
+
 ```bash
-vpl-bench
+var-golden
+```
+
+
+```bash
+var-bench
 # or:
-python -m vpl.apps.research.run_bench
+python -m var.apps.research.run_bench
 ```
 
 Include arithmetic task family:
 
 ```bash
-vpl-bench --include-math
+var-bench --include-math
 ```
 
 Write JSON results:
 
 ```bash
-vpl-bench --include-math --out results.json
+var-bench --include-math --out results.json
 ```
 
 This benchmark is intentionally dataset-free and CI-friendly.
@@ -71,7 +78,7 @@ This benchmark is intentionally dataset-free and CI-friendly.
 For experiments you may publish, record run artifacts:
 
 ```bash
-vpl --research --tool-io safe
+var --research --tool-io safe
 ```
 
 ### Tool I/O capture modes
@@ -82,10 +89,10 @@ vpl --research --tool-io safe
 Example:
 
 ```bash
-vpl --research --tool-io full
+var --research --tool-io full
 ```
 
-Artifacts are stored under **`.vpl_data/`** (configurable via `--root`).
+Artifacts are stored under **`.var_data/`** (configurable via `--root`).
 
 ---
 
@@ -94,13 +101,13 @@ Artifacts are stored under **`.vpl_data/`** (configurable via `--root`).
 Simulate a crash after N steps:
 
 ```bash
-vpl --research --tool-io safe --crash-after-step 3
+var --research --tool-io safe --crash-after-step 3
 ```
 
 Then resume:
 
 ```bash
-vpl --research --resume-run <RUN_ID>
+var --research --resume-run <RUN_ID>
 ```
 
 This enables “resume correctness” metrics: do we finish in the same terminal outcome after a crash?
@@ -119,7 +126,7 @@ Conceptually:
 3) run the orchestrator with the replay executor instead of real tools
 
 Key code:
-- `vpl/research/replay.py`
+- `var/research/replay.py`
 - `tests/test_research_resume_and_replay.py`
 
 ---
@@ -129,7 +136,7 @@ Key code:
 Fault injection is deterministic and composable: wrap any tool with injected failures.
 
 Key code:
-- `vpl/research/fault_injection.py`
+- `var/research/fault_injection.py`
 - `tests/test_flaky_verification_and_fault_injection.py`
 
 Use cases:
@@ -157,12 +164,12 @@ Suggested baseline metrics (extend as needed):
 ### Add new task families
 This repo already demonstrates two families:
 - Coding exercises (template-based)
-- Arithmetic exercises (`vpl/tools/math_generation.py`)
+- Arithmetic exercises (`var/tools/math_generation.py`)
 
 To add a new family:
 - add a generator that returns `ExerciseDraft`
-- route it via `vpl/tools/composite_generation.py`
-- add scenarios in `vpl/eval/*_scenarios.py`
+- route it via `var/tools/composite_generation.py`
+- add scenarios in `var/eval/*_scenarios.py`
 - version your suite (important for publishability)
 
 ---
@@ -172,4 +179,3 @@ To add a new family:
 - The sandbox is lightweight (subprocess + best-effort resource limits), not a hardened security boundary.
 - Runs may store sensitive content depending on `tool-io` capture mode.
 - If you include real students in experiments, plan for consent/ethics review as appropriate.
-

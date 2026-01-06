@@ -6,6 +6,7 @@ from typing import Iterable, Optional
 
 from pydantic import TypeAdapter
 
+from ..research.redaction import to_jsonable
 from ..types import ExerciseArtifact
 
 
@@ -26,7 +27,7 @@ class ExerciseStore:
         path = self.artifacts_dir / f"{artifact.artifact_id}.json"
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
-            json.dumps(artifact.model_dump(mode="json"), indent=2, ensure_ascii=False),
+            json.dumps(to_jsonable(artifact, reveal_secrets=True), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         tmp.replace(path)

@@ -16,6 +16,7 @@ from var.tools.exercise_generation import CompileDraftTool, GenerateDraftTool, a
 from var.tools.grading import GradeSubmissionTool
 from var.tools.hinting import MakeHintTool
 from var.tools.observability import TraceLogTool
+from var.tools.presentation_gate import GateExerciseViewTool, GateGradeReportTool, GateHintTool
 from var.tools.sandbox import SandboxRunner
 from var.tools.verification import ExerciseVerifyTool
 from var.types import AgentState, TraceEvent, TraceEventType
@@ -30,6 +31,9 @@ class TestResearchResumeAndReplay(unittest.TestCase):
             verify=ExerciseVerifyTool(sandbox),
             grade=GradeSubmissionTool(store, sandbox),
             hint=MakeHintTool(store),
+            gate_exercise_view=GateExerciseViewTool(),
+            gate_grade_report=GateGradeReportTool(),
+            gate_hint=GateHintTool(),
             trace_log=TraceLogTool(trace_store),
         )
 
@@ -38,7 +42,7 @@ class TestResearchResumeAndReplay(unittest.TestCase):
         spec = specs[0]
 
         # One correct submission is enough; the crash happens before grading.
-        sol = GenerateDraftTool().run(spec=spec).result.reference_solution
+        sol = GenerateDraftTool().run(spec=spec).result.reference_solution.get_secret_value()
         scenario = Scenario(name="crash_resume", spec=spec, submission_sequence=[sol])
 
         with tempfile.TemporaryDirectory(prefix="var_research_") as tmp:
@@ -80,7 +84,7 @@ class TestResearchResumeAndReplay(unittest.TestCase):
         specs = available_specs(seed=0)
         spec = specs[0]
 
-        sol = GenerateDraftTool().run(spec=spec).result.reference_solution
+        sol = GenerateDraftTool().run(spec=spec).result.reference_solution.get_secret_value()
         scenario = Scenario(name="replay", spec=spec, submission_sequence=[sol])
 
         with tempfile.TemporaryDirectory(prefix="var_replay_") as tmp:

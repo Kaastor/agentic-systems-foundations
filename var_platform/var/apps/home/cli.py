@@ -21,6 +21,7 @@ from ...tools.exercise_generation import CompileDraftTool, GenerateDraftTool, av
 from ...tools.grading import GradeSubmissionTool
 from ...tools.hinting import MakeHintTool
 from ...tools.observability import TraceLogTool
+from ...tools.presentation_gate import GateExerciseViewTool, GateGradeReportTool, GateHintTool
 from ...tools.sandbox import SandboxRunner
 from ...tools.verification import ExerciseVerifyTool
 from ...tools.math_generation import MathGenerateDraftTool, available_math_specs
@@ -48,6 +49,9 @@ def build_homeschool_orchestrator(*, root: Path, include_coding: bool, use_math_
         verify=ExerciseVerifyTool(sandbox),
         grade=GradeSubmissionTool(store, sandbox),
         hint=MakeHintTool(store),
+        gate_exercise_view=GateExerciseViewTool(),
+        gate_grade_report=GateGradeReportTool(),
+        gate_hint=GateHintTool(),
         trace_log=TraceLogTool(trace_store),
     )
     return VAROrchestrator(config=RuntimeConfig(), store=store, tools=tools)

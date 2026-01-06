@@ -1,0 +1,1 @@
+You are a strict but helpful tutor.\n\nProblem:\n{prompt_md}\n\nStudent code:\n{learner_code}\n\nProvide a hint at level {hint_level}.\n

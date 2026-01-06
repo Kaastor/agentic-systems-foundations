@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+from ..budgets.manager import BudgetExceeded, BudgetManager
+from ..budgets.types import BudgetCategory
 from ..research.redaction import redact_jsonable, to_jsonable
 from ..research.types import ToolCallRecord, ToolIOCapture, utc_now
 from ..store.run_store import FileRunStore
@@ -40,6 +42,7 @@ class ToolExecutor:
         emit: Callable[[AgentState, TraceEventType, AgentNode, Dict[str, Any]], None],
         run_store: Optional[FileRunStore],
         executor_cfg: ToolExecutorConfig,
+        budgets: Optional[BudgetManager] = None,
         tool_io_capture: ToolIOCapture = ToolIOCapture.safe,
         record_tool_io: bool = False,
         redact_tool_io: bool = True,
@@ -47,6 +50,7 @@ class ToolExecutor:
         self._emit = emit
         self._run_store = run_store
         self._cfg = executor_cfg
+        self._budgets = budgets
         self._tool_io_capture = tool_io_capture
         self._record_tool_io = record_tool_io
         self._redact_tool_io = redact_tool_io
@@ -75,6 +79,20 @@ class ToolExecutor:
 
         last_res: ToolResult | None = None
         for attempt in range(max_attempts):
+            # Budget: each attempt costs a tool call.
+            if self._budgets is not None:
+                try:
+                    self._budgets.spend(BudgetCategory.tool_calls, 1, reason="tool_call", details={"tool": tool.name})
+                except BudgetExceeded as e:
+                    return ToolResult.failure(
+                        ToolError(
+                            code=ToolErrorCode.BudgetExceeded,
+                            retryable=False,
+                            safe_message=f"Budget exceeded: {e.category.value}",
+                            debug={"tool": tool.name, "category": e.category.value, "used": e.used, "limit": e.limit, "requested": e.requested},
+                        )
+                    )
+
             self._emit(
                 state,
                 TraceEventType.tool_called,
@@ -91,9 +109,30 @@ class ToolExecutor:
             res = tool.run(**call_kwargs)
             dt_ms = int((time.time() - t0) * 1000)
 
+            # Budget: latency accounting (best-effort; if a latency budget is exceeded,
+            # treat it as a non-retryable boundary failure).
+            if self._budgets is not None and dt_ms > 0:
+                try:
+                    self._budgets.spend(BudgetCategory.tool_latency_ms, dt_ms, reason="tool_latency", details={"tool": tool.name})
+                except BudgetExceeded as e:
+                    return ToolResult.failure(
+                        ToolError(
+                            code=ToolErrorCode.BudgetExceeded,
+                            retryable=False,
+                            safe_message=f"Budget exceeded: {e.category.value}",
+                            debug={"tool": tool.name, "category": e.category.value, "used": e.used, "limit": e.limit, "requested": e.requested},
+                        )
+                    )
+
             # Count each attempt (useful for cost/latency proxies).
             state.metrics.tool_calls += 1
             self._call_index += 1
+
+            # Expose budget usage on state for snapshots/debugging (best-effort).
+            if self._budgets is not None:
+                snap = self._budgets.snapshot()
+                state.metrics.budget_used = {k.value: int(v) for k, v in snap.used.items()}
+                state.metrics.budget_limits = {k.value: int(v) for k, v in snap.limits.items()}
 
             self._emit(
                 state,
@@ -164,8 +203,14 @@ class ToolExecutor:
         attempt: int,
         call_index: int,
     ) -> None:
+        capture = self._tool_io_capture
+
+        # For reproducibility, SAFE capture still needs to *see* secrets so it can
+        # hash them deterministically during redaction.
+        reveal_secrets = capture in (ToolIOCapture.safe, ToolIOCapture.full)
+
         # Convert to JSON-ish first.
-        args_payload = to_jsonable(args)
+        args_payload = to_jsonable(args, reveal_secrets=reveal_secrets)
 
         result_payload = None
         result_hash = None
@@ -174,7 +219,7 @@ class ToolExecutor:
         error_for_log: ToolError | None = None
 
         if res.ok:
-            result_payload = to_jsonable(res.result)
+            result_payload = to_jsonable(res.result, reveal_secrets=reveal_secrets)
             try:
                 result_hash = stable_hash(result_payload)
             except Exception:
@@ -182,11 +227,9 @@ class ToolExecutor:
         else:
             error_for_log = res.error
             try:
-                result_hash = stable_hash(to_jsonable(res.error))
+                result_hash = stable_hash(to_jsonable(res.error, reveal_secrets=reveal_secrets))
             except Exception:
                 result_hash = stable_hash(repr(res.error))
-
-        capture = self._tool_io_capture
 
         if capture == ToolIOCapture.hash_only:
             args_payload = None
@@ -194,14 +237,13 @@ class ToolExecutor:
             if error_for_log is not None:
                 error_for_log = error_for_log.model_copy(update={"debug": {}})
         elif capture == ToolIOCapture.safe:
-            if self._redact_tool_io:
-                args_payload = redact_jsonable(args_payload)
-                if result_payload is not None:
-                    result_payload = redact_jsonable(result_payload)
-                if error_for_log is not None:
-                    # Keep error code + safe_message, drop debug.
-                    error_for_log = error_for_log.model_copy(update={"debug": {}})
-        # capture == full -> store everything as-is
+            # SAFE means "redacted publishable." We enforce redaction regardless of config.
+            args_payload = redact_jsonable(args_payload)
+            if result_payload is not None:
+                result_payload = redact_jsonable(result_payload)
+            if error_for_log is not None:
+                error_for_log = error_for_log.model_copy(update={"debug": {}})
+        # capture == full -> store everything as-is (contains secrets)
 
         record = ToolCallRecord(
             ts=utc_now(),

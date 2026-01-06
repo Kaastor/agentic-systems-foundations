@@ -40,10 +40,12 @@ class GradeSubmissionTool(Tool):
     def run(self, *, submission: Submission, constraints: Constraints) -> ToolResult[GradeReport]:
         artifact = self._store.get(submission.artifact_id)
 
+        learner_code = submission.learner_code.get_secret_value()
+
         policy_flags: List[str] = []
 
         # Policy: forbidden imports are a hard fail (do not even run).
-        forbidden = scan_forbidden_imports(submission.learner_code, constraints.forbidden_imports)
+        forbidden = scan_forbidden_imports(learner_code, constraints.forbidden_imports)
         if forbidden:
             policy_flags.append("forbidden_import_used")
             test_results = [
@@ -66,15 +68,15 @@ class GradeSubmissionTool(Tool):
             )
 
         # UX nicety: if function name doesn't match expected, fail early with clear message.
-        expected_fn = _first_top_level_function_name(artifact.reference_solution)
+        expected_fn = _first_top_level_function_name(artifact.reference_solution.get_secret_value())
         code_parses = True
         try:
-            ast.parse(submission.learner_code)
+            ast.parse(learner_code)
         except SyntaxError:
             code_parses = False
 
         if expected_fn and code_parses:
-            learner_fn = extract_function_signature(submission.learner_code, expected_fn)
+            learner_fn = extract_function_signature(learner_code, expected_fn)
             if learner_fn is None:
                 policy_flags.append("missing_required_function")
                 test_results = [
@@ -100,7 +102,7 @@ class GradeSubmissionTool(Tool):
             max_memory_mb=constraints.max_memory_mb,
         )
 
-        run_res = self._sandbox.run(code=submission.learner_code, tests=artifact.hidden_tests, limits=limits)
+        run_res = self._sandbox.run(code=learner_code, tests=artifact.hidden_tests.get_secret_value(), limits=limits)
         if not run_res.ok:
             policy_flags.append(run_res.error.code.value)
             test_results = [

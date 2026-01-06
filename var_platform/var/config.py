@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .budgets.types import BudgetCategory, BudgetLimits
 from .research.types import ToolIOCapture
 
 
@@ -63,6 +64,42 @@ class RuntimeConfig:
 
     # Research-mode recording and fault injection hooks.
     research: ResearchConfig = field(default_factory=ResearchConfig)
+
+    # Optional spend budgets (tokens, tool calls, sandbox time, etc.).
+    budgets: "BudgetConfig" = field(default_factory=lambda: BudgetConfig())
+
+
+@dataclass(frozen=True)
+class BudgetConfig:
+    """Optional runtime budgets.
+
+    Budgets are a separate concept from loop bounds. They allow you to cap resources
+    (tool calls, latency, model tokens, sandbox time) regardless of how many steps
+    you allow.
+    """
+
+    enabled: bool = False
+    limits: BudgetLimits = field(default_factory=BudgetLimits)
+
+    @staticmethod
+    def from_simple(
+        *,
+        enabled: bool,
+        max_tool_calls: Optional[int] = None,
+        max_tool_latency_ms: Optional[int] = None,
+        max_model_total_tokens: Optional[int] = None,
+        max_sandbox_runtime_ms: Optional[int] = None,
+    ) -> "BudgetConfig":
+        limits: Dict[BudgetCategory, int] = {}
+        if max_tool_calls is not None:
+            limits[BudgetCategory.tool_calls] = int(max_tool_calls)
+        if max_tool_latency_ms is not None:
+            limits[BudgetCategory.tool_latency_ms] = int(max_tool_latency_ms)
+        if max_model_total_tokens is not None:
+            limits[BudgetCategory.model_total_tokens] = int(max_model_total_tokens)
+        if max_sandbox_runtime_ms is not None:
+            limits[BudgetCategory.sandbox_runtime_ms] = int(max_sandbox_runtime_ms)
+        return BudgetConfig(enabled=enabled, limits=BudgetLimits(limits=limits))
 
 
 @dataclass(frozen=True)

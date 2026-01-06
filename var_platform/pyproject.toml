@@ -18,6 +18,8 @@ var = "var.cli:main"
 var-course = "var.apps.course.cli:main"
 var-home = "var.apps.home.cli:main"
 var-bench = "var.apps.research.run_bench:main"
+var-golden = "var.eval.golden_suite:main"
+var-brutal = "var.eval.brutal_suite:main"
 
 [tool.ruff]
 line-length = 100

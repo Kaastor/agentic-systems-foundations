@@ -9,14 +9,14 @@ This repo supports three “products” without forking architecture:
 - **University course edition** (minimal, teachable core)
 - **Homeschool prototype** (profiles + mastery-lite on the same verified loop)
 
-> Note: package/module names may still reference legacy `vpl` naming. “VAR” is the preferred project name going forward.
+> Note: package/module names may still reference legacy `var` naming. “VAR” is the preferred project name going forward.
 
 ---
 
 ## Repository layout
 
 ```
-vpl/
+var/
   agent/          # FSM orchestrator + tool executor
   tools/          # typed tool boundaries: generate/verify/grade/hint/trace/sandbox
   store/          # exercise store, trace store, run store (research artifacts)
@@ -46,12 +46,12 @@ pip install -e .
 
 ### Run the full platform CLI (interactive)
 ```bash
-vpl
+var
 # or:
-python -m vpl.cli
+python -m var.cli
 ```
 
-Default workspace directory: **`.vpl_data/`** (override via `--root`).
+Default workspace directory: **`.var_data/`** (override via `--root`).
 
 ---
 
@@ -59,32 +59,38 @@ Default workspace directory: **`.vpl_data/`** (override via `--root`).
 
 ### 1) Course Edition (minimal surface)
 ```bash
-vpl-course
+var-course
 # or:
-python -m vpl.apps.course.cli
+python -m var.apps.course.cli
 ```
 
-Writes to **`.vpl_course/`** by default.
+Writes to **`.var_course/`** by default.
 
 ### 2) Research bench runner (deterministic)
 ```bash
-vpl-bench
+var-bench
 # optional:
-vpl-bench --include-math --out results.json
+var-bench --include-math --out results.json
 ```
 
 ### 3) Homeschool prototype (profiles + mastery-lite)
 ```bash
-vpl-home
+var-home
 # optionally mix in coding tasks:
-vpl-home --include-coding
+var-home --include-coding
 ```
 
-Writes to **`.vpl_home/`** by default.
+Writes to **`.var_home/`** by default.
 
 ---
 
 ## Kernel concepts (the “steel thread”)
+
+
+### Two SOTA-shaped upgrades in this repo
+
+- **Outcomes are first-class**: tools returning `ToolResult(ok=...)` are separated from domain success via `Outcome(kind=Pass|Fail|Flaky|Timeout|PolicyViolation|...)`.
+- **Universal PresentationGate**: anything learner-facing (exercise, grade, hint) is blocked unless it passes a deterministic gate.
 
 The system enforces a hard invariant:
 
@@ -104,7 +110,7 @@ This creates reliable behavior and measurable failure modes:
 The full CLI supports run recording:
 
 ```bash
-vpl --research --tool-io safe
+var --research --tool-io safe
 ```
 
 Tool I/O capture:
@@ -114,8 +120,8 @@ Tool I/O capture:
 
 Crash/resume:
 ```bash
-vpl --research --crash-after-step 3
-vpl --research --resume-run <RUN_ID>
+var --research --crash-after-step 3
+var --research --resume-run <RUN_ID>
 ```
 
 ---
@@ -127,7 +133,7 @@ For teaching, you may want to ship a trimmed repo without research/homeschool ex
 One simple approach is syncing into a separate directory while excluding research-only modules:
 
 ```bash
-rsync -a --delete ./var_platform/ ./var_course/   --exclude 'vpl/research/'   --exclude 'vpl/apps/research/'   --exclude 'vpl/apps/home/'   --exclude 'tests/test_research_*'   --exclude 'tests/test_flaky_verification_and_fault_injection.py'
+rsync -a --delete ./var_platform/ ./var_course/   --exclude 'var/research/'   --exclude 'var/apps/research/'   --exclude 'var/apps/home/'   --exclude 'tests/test_research_*'   --exclude 'tests/test_flaky_verification_and_fault_injection.py'
 ```
 
 **Tip:** run with `--dry-run` first to see what would be copied/deleted.
@@ -161,4 +167,3 @@ Quality expectations:
 - preserve the verified-before-present invariant
 - add/extend unit tests for any behavioral change
 - treat tool boundaries as stable APIs (schemas + error taxonomy)
-

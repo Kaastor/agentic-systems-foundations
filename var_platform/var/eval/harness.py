@@ -16,12 +16,12 @@ from ..tools.math_generation import MathGenerateDraftTool, available_math_specs
 from ..tools.grading import GradeSubmissionTool
 from ..tools.hinting import MakeHintTool
 from ..tools.observability import TraceLogTool
+from ..tools.presentation_gate import GateExerciseViewTool, GateGradeReportTool, GateHintTool
 from ..tools.sandbox import SandboxRunner
 from ..tools.verification import ExerciseVerifyTool
 from ..types import ExerciseSpec, ExerciseView, GradeReport, HintArtifact
 
 from .scenarios import Scenario, scenario_matrix
-from .math_scenarios import math_scenario_matrix
 from .math_scenarios import math_scenario_matrix
 
 
@@ -70,7 +70,7 @@ def _solutions_by_fn() -> Dict[str, str]:
     out: Dict[str, str] = {}
     for spec in available_specs(seed=0):
         draft = gen.run(spec=spec).result
-        out[spec.signature.name] = draft.reference_solution
+        out[spec.signature.name] = draft.reference_solution.get_secret_value()
     return out
 
 
@@ -95,6 +95,9 @@ def run_eval_suite(*, include_math: bool = False) -> List[dict]:
             verify=ExerciseVerifyTool(sandbox),
             grade=GradeSubmissionTool(store, sandbox),
             hint=MakeHintTool(store),
+            gate_exercise_view=GateExerciseViewTool(),
+            gate_grade_report=GateGradeReportTool(),
+            gate_hint=GateHintTool(),
             trace_log=TraceLogTool(trace_store),
         )
 

@@ -13,6 +13,7 @@ from var.tools.exercise_generation import CompileDraftTool, GenerateDraftTool, a
 from var.tools.grading import GradeSubmissionTool
 from var.tools.hinting import MakeHintTool
 from var.tools.observability import TraceLogTool
+from var.tools.presentation_gate import GateExerciseViewTool, GateGradeReportTool, GateHintTool
 from var.tools.sandbox import SandboxRunner
 from var.tools.verification import ExerciseVerifyTool
 from var.types import AgentNode, ToolErrorCode
@@ -34,7 +35,7 @@ class TestFlakyVerificationAndFaultInjection(unittest.TestCase):
             specs = available_specs(seed=7)
             spec = next(s for s in specs if s.signature.name == "count_vowels")
 
-            correct = GenerateDraftTool().run(spec=spec).result.reference_solution
+            correct = GenerateDraftTool().run(spec=spec).result.reference_solution.get_secret_value()
             scenario = Scenario(
                 name="count_vowels::flaky_verification_regen",
                 spec=spec,
@@ -48,6 +49,9 @@ class TestFlakyVerificationAndFaultInjection(unittest.TestCase):
                 verify=ExerciseVerifyTool(sandbox),
                 grade=GradeSubmissionTool(store, sandbox),
                 hint=MakeHintTool(store),
+                gate_exercise_view=GateExerciseViewTool(),
+                gate_grade_report=GateGradeReportTool(),
+                gate_hint=GateHintTool(),
                 trace_log=TraceLogTool(traces),
             )
 
@@ -69,7 +73,7 @@ class TestFlakyVerificationAndFaultInjection(unittest.TestCase):
             traces = FileTraceStore(root)
 
             spec = available_specs(seed=0)[0]
-            correct = GenerateDraftTool().run(spec=spec).result.reference_solution
+            correct = GenerateDraftTool().run(spec=spec).result.reference_solution.get_secret_value()
             scenario = Scenario(
                 name=f"{spec.signature.name}::transient_tool_error",
                 spec=spec,
@@ -97,6 +101,9 @@ class TestFlakyVerificationAndFaultInjection(unittest.TestCase):
                 verify=ExerciseVerifyTool(sandbox),
                 grade=GradeSubmissionTool(store, sandbox),
                 hint=MakeHintTool(store),
+                gate_exercise_view=GateExerciseViewTool(),
+                gate_grade_report=GateGradeReportTool(),
+                gate_hint=GateHintTool(),
                 trace_log=TraceLogTool(traces),
             )
 

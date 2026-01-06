@@ -12,6 +12,8 @@ from typing import Any, Dict, List
 
 from pydantic import TypeAdapter
 
+from ..budgets.manager import BudgetExceeded, BudgetManager
+from ..budgets.types import BudgetCategory
 from ..types import ExecutionLimits, ExecutionReport, TestCaseResult, ToolError, ToolErrorCode
 from ..utils import truncate
 from .base import Tool, ToolResult
@@ -195,10 +197,24 @@ class SandboxRunner(Tool):
     name = "sandbox.run"
     version = "local-subprocess-v1"
 
-    def __init__(self) -> None:
+    def __init__(self, budgets: BudgetManager | None = None) -> None:
         self._adapter = TypeAdapter(dict)
+        self._budgets = budgets
 
     def run(self, *, code: str, tests: str, limits: ExecutionLimits) -> ToolResult[ExecutionReport]:
+        # Budget: sandbox calls are a first-class cost (especially in teaching labs).
+        if self._budgets is not None:
+            try:
+                self._budgets.spend(BudgetCategory.sandbox_calls, 1, reason="sandbox_call")
+            except BudgetExceeded as e:
+                return ToolResult.failure(
+                    ToolError(
+                        code=ToolErrorCode.BudgetExceeded,
+                        retryable=False,
+                        safe_message=f"Budget exceeded: {e.category.value}",
+                        debug={"category": e.category.value, "used": e.used, "limit": e.limit, "requested": e.requested},
+                    )
+                )
         # Basic validation at the boundary
         if not isinstance(code, str) or not isinstance(tests, str):
             return ToolResult.failure(
@@ -256,6 +272,21 @@ class SandboxRunner(Tool):
                 )
 
             wall_ms = int((time.time() - started) * 1000)
+
+            # Budget: account sandbox runtime (quantize later in report, but spend
+            # on the measured wall-time).
+            if self._budgets is not None and wall_ms > 0:
+                try:
+                    self._budgets.spend(BudgetCategory.sandbox_runtime_ms, wall_ms, reason="sandbox_runtime")
+                except BudgetExceeded as e:
+                    return ToolResult.failure(
+                        ToolError(
+                            code=ToolErrorCode.BudgetExceeded,
+                            retryable=False,
+                            safe_message=f"Budget exceeded: {e.category.value}",
+                            debug={"category": e.category.value, "used": e.used, "limit": e.limit, "requested": e.requested},
+                        )
+                    )
 
             # Runner prints JSON to stdout. If parsing fails, treat as a tool error.
             try:

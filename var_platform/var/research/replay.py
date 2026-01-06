@@ -13,8 +13,10 @@ from ..types import (
     AgentState,
     ExerciseArtifact,
     ExerciseDraft,
+    ExerciseView,
     GradeReport,
     HintArtifact,
+    Outcome,
     TraceEventType,
     ToolError,
     ToolErrorCode,
@@ -59,9 +61,12 @@ class ReplayToolExecutor:
             self._adapters = {
                 "exercise.generate_draft": TypeAdapter(ExerciseDraft),
                 "exercise.compile": TypeAdapter(ExerciseArtifact),
-                "exercise.verify": TypeAdapter(VerificationReport),
+                "exercise.verify": TypeAdapter(Outcome[VerificationReport]),
                 "grader.grade": TypeAdapter(GradeReport),
                 "tutor.make_hint": TypeAdapter(HintArtifact),
+                "present.gate_exercise_view": TypeAdapter(Outcome[ExerciseView]),
+                "present.gate_grade_report": TypeAdapter(Outcome[GradeReport]),
+                "present.gate_hint": TypeAdapter(Outcome[HintArtifact]),
             }
 
     def call(
