@@ -917,6 +917,47 @@ But the architecture is identical to production:
 - kernel enforces
 - all effects go through the gate
 
+**Terminology note:** "K5-lite" appears twice in this document with different meanings:
+- **§2 (production):** "K5-lite for sensitive reads" = production pattern for read-only agents accessing ACL'd data (allowlist + scope constraints + decision logging).
+- **§7 (teaching):** "K5 Policy: Lite" = simplified policy for the teaching kernel (allowlist + CLI approval, no two-phase preview).
+
+Both share the core principle: *effects are gated by policy*. The teaching version is simpler; the production version handles more edge cases.
+
+**Included subsystems (teaching scope):**
+
+| Subsystem | Lite Scope | Implementation |
+|-----------|------------|----------------|
+| **K1** ABI | Full | Pydantic models, `stable_hash()`, error taxonomy |
+| **K2** Orchestrator | Full | FSM with transitions, stop conditions, cancel/abort |
+| **K3** Model Boundary | Basic | One provider wrapper, schema validation, bounded repair |
+| **K4** Tool Executor | Full | Schema validation, timeouts, idempotency keys, typed errors |
+| **K5** Policy | Lite | Simple allowlist + CLI approval (no full two-phase preview) |
+| **K6** Budgets | Full | Step + time + token caps |
+| **K7** Verification | Lite | Schema/type checks; verifier registry pattern |
+| **K9** Audit | Lite | JSONL append-only (no hash chain) |
+| **K10** Persistence | Lite | SQLite outbox for idempotency; basic checkpoints |
+| **K18** Sanitizer | Full | `SanitizedContent` envelope, provenance, suspicion flags |
+
+**Excluded (production-only complexity):**
+
+| Subsystem | Why Excluded |
+|-----------|--------------|
+| **K5-full** | Two-phase preview/commit with binding hashes requires approval UX |
+| **K8** Sandbox | nsjail/gVisor requires system-level setup |
+| **K9-full** | Tamper-evident hash chains, external sinks |
+| **K11** Replay | Recording infrastructure, deterministic time |
+| **K12** Eval Gates | CI integration, suite governance |
+| **K14** Secrets | KMS, credential broker, short-lived tokens |
+| **K16** Bundles | Artifact registry, canary, migrations |
+| **Multi-tenant** | Isolation, per-tenant policies, offboarding |
+
+**Critical invariants still enforced in Lite:**
+1. Strategies cannot call tools directly (capability discipline)
+2. Untrusted content is enveloped (K18)
+3. Budgets are hard caps (K6)
+4. Effects are gated by policy (K5-lite)
+5. Audit trail exists (K9)
+
 ### 7.3 6-module curriculum (with labs)
 
 #### Module 1 — Kernel mindset: trust boundaries and TCB
