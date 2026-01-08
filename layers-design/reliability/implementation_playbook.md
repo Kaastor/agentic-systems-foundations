@@ -508,7 +508,7 @@ Implementation sketch:
 
 This makes “resume” and “time travel debugging” boring in the best way.
 
-(Concrete storage patterns are in §13.2.)
+(Concrete storage patterns are in §13.3.)
 
 ### 1.6 Upgrade: capability tokens (authorization as an object)
 
@@ -532,6 +532,96 @@ You already enforce “data ≠ instructions” (K18). The elegance move is to m
 (Concrete `ContextPlan`/renderer patterns are in §7.4.)
 
 ---
+
+
+### 1.8 Operational resilience patterns (circuit breaker, bulkhead, saga)
+
+You already have budgets, retries, outbox/idempotency, and deterministic orchestration. The next production step is to add **operational resilience patterns** that prevent *cascading failure* when external dependencies misbehave.
+
+These patterns belong **outside KernelCore** (which stays pure-ish). They live primarily in the **EffectRunner** and the adapters it calls.
+
+#### Circuit breaker (dependency-level “stop hurting yourself”)
+
+**Purpose:** when a dependency starts failing, stop hammering it and quickly surface a typed failure so the kernel can degrade/abort deterministically.
+
+**Where it lives:** `kernel_tcb/resilience/breaker.py` + used by `EffectRunner` around:
+- model provider calls,
+- tool adapter calls,
+- policy/approval service calls,
+- persistence/outbox writes (if remote).
+
+**Design rules**
+- Breakers are keyed by a **dependency key** (`model:<provider>`, `tool:<tool_name>`, `policy:<bundle_id>`, etc.).
+- Breaker state transitions emit audit/trace events (K9) and metrics.
+- Fail **closed** for safety: a breaker-open result is treated as a hard stop or safe-mode transition, not “try random alternatives.”
+
+#### Bulkhead (isolate capacity so one fire doesn’t burn the building)
+
+**Purpose:** prevent one slow/flaky dependency from consuming all concurrency and starving unrelated work (including safe shutdown/resume).
+
+**Where it lives:** `kernel_tcb/resilience/bulkhead.py` + used by `EffectRunner` and worker pools.
+
+**Common bulkheads**
+- Per-tenant run concurrency (`tenant_id` → semaphore/limiter)
+- Per-tool concurrency (`tool:<name>` → limiter)
+- Separate pools for **model** vs **tools** vs **persistence** (so a stuck tool can’t block audits/checkpoints)
+
+**Design rules**
+- Bulkheads should be **bounded** (max queue / fail-fast); do not build infinite queues.
+- Overflow must produce a typed “overloaded” observation to KernelCore (deterministic handling).
+
+#### Saga (multi-step side effects with compensations)
+
+**Purpose:** when a user-visible action spans multiple external side effects, you need a pattern for **partial failure** that is safer than “best effort + shrug”.
+
+**Where it lives:** KernelCore defines saga state machine + emits tool effects; Outbox provides idempotent step commits; the saga runner is effectively “just more deterministic orchestration.”
+
+**Design rules**
+- Model “transaction” as a series of **steps** with optional **compensating actions**.
+- Every step (and compensation) must be idempotent and outbox-gated.
+- Persist saga progress as events (or state + checkpoints) so crash/resume continues deterministically.
+- Compensation is not magic: if compensations fail, escalate to manual remediation (ticket, alert, human approval).
+
+---
+
+### 1.9 Extensibility patterns (grow capabilities without widening the TCB)
+
+Extensibility is where agent kernels usually die: teams add “just one more hook” until the trust boundary is mush.
+
+Use these patterns to scale features while keeping the kernel small:
+
+#### Ports & adapters (already your baseline)
+
+KernelCore and the reference monitor remain stable. Everything else is an adapter behind a port.
+
+#### Plugin registry + manifests (safe discovery)
+
+- Tools, verifiers, and policy bundles are discovered through **registries** (not ad-hoc imports).
+- Every plugin has a manifest: version, capabilities, schemas, and operational limits.
+
+#### Versioned contracts (evolution without flag days)
+
+- ABI is versioned (`abi_version`) and rejects incompatible clients.
+- Effect types and event schemas are **append-only**; include `schema_version` and support forward-compatible decoding.
+- Provide adapters for older plugin versions at the boundary (anti-corruption layer).
+
+#### Middleware pipeline for cross-cutting concerns
+
+Cross-cutting concerns (resilience, metrics, redaction, retries) are implemented as **EffectRunner middleware**, not scattered across orchestration code.
+
+#### Feature flags + strangler rollouts
+
+- Roll out new tools/policies/strategies behind feature flags.
+- Prefer strangler migrations (route a subset of traffic to the new implementation; compare traces).
+
+#### Contract tests for extensions
+
+Every extension must ship with contract tests:
+- tool schema validation + canonicalization,
+- idempotency key behavior,
+- capability token enforcement,
+- determinism in record/replay mode.
+
 
 ## 2. Repo layout and guardrails
 
@@ -669,12 +759,77 @@ Architectural hardening:
 Pick one early; it changes how you debug and how you resume.
 
 - **Option A (simpler):** persisted state + append-only audit (K9) + outbox (K10).
-- **Option B (elegant):** event-sourced run state (fold events → state) + snapshots (see §13.2).
+- **Option B (elegant):** event-sourced run state (fold events → state) + snapshots (see §13.3).
 
 If you choose Option B, decide now:
 - **Storage backend:** Postgres (recommended), SQLite (dev), or log systems (Kafka) once you need scale.
 - **Event evolution rules:** append-only fields; explicit `schema_version`; never mutate old events.
 - **Retention + privacy:** whether events can contain any user text (ideally: only redacted/sanitized).
+
+
+#### 3.3.5 Persistence abstraction boundaries (repositories + Unit of Work)
+
+This is **recommended for scale** (and for sanity). It turns “we might move from SQLite → Postgres later” into a *swap of adapters* instead of a repo-wide refactor.
+
+**Rule:** one kernel step should be able to write **audit events + state snapshot + outbox rows** in a single atomic boundary.
+
+Adopt:
+
+- **Repository protocols**: `RunRepository`, `OutboxRepository`, `AuditRepository` (and `RunEventRepository` if you event-source).
+- A **Unit of Work** (UoW) that binds those repos to a single transaction.
+- Kernel code depends only on these ports; SQLite/Postgres become implementations in `packages/kernel_tcb/persistence/*`.
+
+```python
+# kernel_tcb/persistence/ports.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Protocol, Sequence, Optional
+from uuid import UUID
+
+@dataclass(frozen=True)
+class RunSnapshot:
+    run_id: UUID
+    seq: int
+    state_json: str
+    state_hash: str
+
+class RunRepository(Protocol):
+    def load_snapshot(self, *, run_id: UUID) -> Optional[RunSnapshot]: ...
+    def save_snapshot(self, snap: RunSnapshot) -> None: ...
+
+class OutboxRepository(Protocol):
+    def begin(self, rec: "OutboxRecord") -> bool: ...
+    def mark_delivered(self, *, idempotency_key: str, result_json: str) -> None: ...
+    def mark_failed_retryable(self, *, idempotency_key: str, error_code: str, error_json: str, next_attempt_at: float) -> None: ...
+    def dead_letter(self, *, idempotency_key: str, reason: str, error_code: str, error_json: str) -> None: ...
+
+class AuditRepository(Protocol):
+    def append(self, event: "AuditEvent") -> None: ...
+    def query(self, *, run_id: UUID, after_seq: int = 0, limit: int = 500) -> list["AuditEvent"]: ...
+    def get_head(self, *, run_id: UUID) -> tuple[int, str]: ...  # (last_seq, last_chain_hash)
+
+class RunEventRepository(Protocol):
+    def append(self, *, run_id: UUID, event_type: str, payload: dict) -> "RunEvent": ...
+    def tail(self, *, run_id: UUID, after_seq: int) -> list["RunEvent"]: ...
+
+class UnitOfWork(Protocol):
+    runs: RunRepository
+    outbox: OutboxRepository
+    audit: AuditRepository
+    events: Optional[RunEventRepository]  # None if not event-sourcing
+
+    def commit(self) -> None: ...
+    def rollback(self) -> None: ...
+
+    def __enter__(self) -> "UnitOfWork": ...
+    def __exit__(self, exc_type, exc, tb) -> None: ...
+```
+
+**Why a UoW matters:** without it, you will eventually produce “audit says effect was committed, but outbox row didn’t exist” (or the inverse) during partial failures.
+
+**Minimum acceptance tests:**
+- A kernel step that writes audit + outbox + snapshot fails mid-way → after restart, either *all* three are present or *none* are (atomicity).
+- Repositories can be swapped (SQLite adapter → Postgres adapter) while KernelCore and EffectRunner tests remain unchanged.
 
 ---
 
@@ -688,13 +843,20 @@ If you choose Option B, decide now:
   - policy allow/deny/needs_approval counts
   - tool executions by tool_name + outcome
   - outbox pending + retries + dead letters
+  - audit verify failures
+  - signed run summaries generated + verification failures
   - replay-mode “blocked external call” counter (should be zero in production runs, non-zero only in tests)
 
 #### Resilience defaults (required)
+
 - **Timeouts everywhere** (model/tool/policy/strategy RPC/persistence).
 - **Retry policy** with strict bounds + jitter; never retry non-idempotent operations without outbox gating.
 - **Backpressure:** cap concurrent runs per tenant; cap effect queue depth; fail fast with typed overload errors.
-- **Circuit breakers** for flaky integrations.
+- **Circuit breakers** per dependency key (model/provider/tool/policy/persistence) with open/half-open/closed states.
+- **Bulkheads** (capacity isolation): separate concurrency limits for model vs tools vs persistence, plus per-tool/per-tenant limiters.
+- **Load shedding / graceful degradation:** when bulkheads trip or breakers open, return typed observations and enter safe mode (K15) rather than “try harder”.
+- **Saga discipline for multi-step writes:** any action that spans multiple side effects must either (a) be designed as a saga with compensations, or (b) be explicitly classified as “non-atomic; manual remediation required” and alerted.
+
 
 #### Data governance (required)
 - Redaction happens **before** any write (audit/state/events).
@@ -857,7 +1019,7 @@ Required tests:
 Deliverables:
 - durable outbox intent records,
 - idempotency semantics documented per tool,
-- (optional) append-only **run event stream** + snapshots if adopting event-sourced state (§13.2).
+- (optional) append-only **run event stream** + snapshots if adopting event-sourced state (§13.3).
 
 Required tests:
 - `test_resume_does_not_duplicate_side_effect`
@@ -1017,6 +1179,95 @@ class StrategyProposal(BaseModel):
 **Deployment note:** `StrategyPort` is deliberately small so you can run strategies **in-process** during early development and later swap to an **out-of-process** `RpcStrategyClient` (Unix socket / gRPC) without changing kernel invariants. The kernel still treats proposals as untrusted input and validates them strictly before acting.
 
 
+
+---
+
+
+### 5.3 Extension points (tools, verifiers, policies, middleware) — without breaking the boundary
+
+You want teams to add capabilities quickly **without** modifying the kernel’s trusted core.
+
+This section defines the recommended extension points and the patterns that keep them safe.
+
+#### A. Tool packs (new tools without kernel edits)
+
+Pattern: **manifest + adapter + registry**
+
+- Each tool ships:
+  - a `ToolManifest` (schemas, risk tier, default limits),
+  - an adapter implementing `ToolPort` for that tool,
+  - contract tests (see §21.2).
+- Kernel loads tools via a **registry** (config or package entry points), not via direct imports in KernelCore.
+
+```python
+# kernel_tcb/tools/registry.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Callable
+
+@dataclass(frozen=True)
+class ToolRegistration:
+    name: str
+    manifest: "ToolManifest"
+    adapter_factory: Callable[[], "ToolPort"]  # adapter created in runner layer
+
+class ToolRegistry:
+    def __init__(self):
+        self._tools: dict[str, ToolRegistration] = {}
+
+    def register(self, reg: ToolRegistration) -> None:
+        if reg.name in self._tools:
+            raise ValueError(f"duplicate tool: {reg.name}")
+        self._tools[reg.name] = reg
+
+    def get(self, name: str) -> ToolRegistration:
+        return self._tools[name]
+```
+
+**Rule:** KernelCore only ever sees the *name + canonical args*; it never holds adapter objects.
+
+#### B. Verifier packs (new safety checks without orchestration drift)
+
+Pattern: **chain-of-responsibility** (ordered verifiers)
+
+- Verifiers are pure-ish functions or small services.
+- They run in a deterministic order and may veto execution.
+
+#### C. Policy bundles (data-only, versioned)
+
+Pattern: **data-driven policy** with strict schema/versioning
+
+- Policy is configured by bundles (append-only schema; signed if needed).
+- Policy changes are versioned and can be rolled back independently.
+
+#### D. EffectRunner middleware (cross-cutting additions)
+
+Pattern: **middleware pipeline** for effect execution
+
+Use middleware for:
+- circuit breakers/bulkheads/retries,
+- metrics/tracing,
+- redaction enforcement,
+- rate limiting / quotas.
+
+```python
+# kernel_tcb/effects/middleware.py
+from __future__ import annotations
+from typing import Protocol, Any
+
+class EffectMiddleware(Protocol):
+    def before(self, effect: Any) -> None: ...
+    def after(self, effect: Any, outcome: Any) -> None: ...
+    def on_error(self, effect: Any, err: Exception) -> None: ...
+```
+
+**Rule:** Middleware runs in the runner layer, not in KernelCore.
+
+#### E. Safe evolution rules
+
+- Additive changes only for effect/event schemas (append-only fields).
+- ABI version bumps when behavior changes in a way a strategy client must know about.
+- New tools/verifiers/policies must not require KernelCore edits unless they change invariants.
 
 ---
 
@@ -1340,6 +1591,142 @@ class AuditLedger:
         self._prev = chain_hash
 ```
 
+
+
+### 8.4 Audit read path (query + pagination + authorization)
+
+Writing an audit log is table stakes. In production you also need a **read API** that supports:
+- incident response (“what happened after seq N?”),
+- compliance export,
+- replay/debug (“show me policy decisions + tool commits in order”).
+
+Add a storage-backed read port (the sink can still be append-only, but the *store* must support query).
+
+```python
+# kernel_tcb/audit/read.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Protocol
+from uuid import UUID
+
+@dataclass(frozen=True)
+class AuditHead:
+    last_seq: int
+    last_chain_hash: str
+
+class AuditReader(Protocol):
+    def query(self, *, run_id: UUID, after_seq: int = 0, limit: int = 500) -> list["AuditEvent"]: ...
+    def get_head(self, *, run_id: UUID) -> AuditHead: ...
+```
+
+**Authorization:** Audit reads are a high-value data path.
+- Always scope by `tenant_id` (and by principal role).
+- Consider separating “operator audit read” from “user run view” endpoints.
+
+### 8.5 Verify chain (tamper detection for a run)
+
+Expose a verifier that recomputes the per-run chain and tells you **where it breaks**.
+
+```python
+# kernel_tcb/audit/verify.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional
+from uuid import UUID
+
+@dataclass(frozen=True)
+class ChainVerification:
+    ok: bool
+    first_bad_seq: Optional[int] = None
+    expected_prev: Optional[str] = None
+    observed_prev: Optional[str] = None
+
+class AuditVerifier:
+    def __init__(self, *, reader: "AuditReader", run_secret_loader: "RunSecretLoader"):
+        self._reader = reader
+        self._secrets = run_secret_loader
+
+    def verify_chain(self, *, run_id: UUID) -> ChainVerification:
+        # Pseudocode: recompute chain hashes exactly as the ledger did (canonical JSON + hash/HMAC).
+        # Requires access to the per-run secret/key material used for chaining.
+        ...
+```
+
+**Implementation note:** if you don’t want verifiers to access per-run secrets, use a *public* hash chain (SHA-256 over canonical JSON + prev hash) and sign the run head instead. Either way: verification must be deterministic.
+
+### 8.6 Global tamper evidence (signed run summaries + global chaining)
+
+Per-run chains detect tampering *within* a run stream. They do not detect:
+- entire runs being deleted,
+- run streams being replaced wholesale.
+
+Add a **signed run summary** at completion, then chain summaries globally.
+
+**Minimal signed run summary:**
+- `run_id`, `tenant_id`, `principal_id`
+- start/end timestamps
+- final status + failure reason code (if any)
+- audit head: `{last_seq, last_chain_hash}`
+- counts: tool_exec_count, approvals_count, policy_decisions_count
+- `summary_hash`, `signature`, `kid`
+
+**Global chain record:**
+- `global_seq`, `ts_epoch`
+- `summary_hash`
+- `prev_global_hash`
+- `global_hash` (hash(summary_hash + prev_global_hash + metadata))
+
+**Critical nuance:** global chaining only adds real security if the chain head is anchored somewhere an attacker with primary-DB access cannot rewrite.
+
+Anchor options (choose one when threat model demands it):
+- WORM object storage (object lock / retention)
+- separate security account/project with different credentials
+- external transparency/notary service
+- (last resort) periodic offline export to a restricted system
+
+```python
+# kernel_tcb/audit/transparency.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Protocol
+
+@dataclass(frozen=True)
+class RunSummary:
+    run_id: str
+    tenant_id: str
+    principal_id: str
+    started_ts: float
+    ended_ts: float
+    status: str
+    audit_last_seq: int
+    audit_last_chain_hash: str
+    counts: dict[str, int]
+
+@dataclass(frozen=True)
+class SignedRunSummary:
+    summary: RunSummary
+    summary_hash: str
+    signature: str
+    kid: str
+
+class TransparencyAnchor(Protocol):
+    def write_head(self, *, ts_epoch: float, global_head_hash: str) -> None: ...
+```
+
+### 8.7 Audit export bundles (portable investigations)
+
+Add a deterministic export format so investigators can move evidence across systems.
+
+- `export_run(run_id) -> {events.jsonl, head.json, signature}`
+- include:
+  - ordered audit events (redacted),
+  - audit head hash,
+  - optional signed run summary,
+  - verification metadata (schema versions, hashing algorithm ids)
+
+This makes “prove what happened” a tooling problem, not a hero problem.
+
+
 ---
 
 ## 9. K2 + K6 — Deterministic orchestrator with budgets & cancellation
@@ -1486,6 +1873,176 @@ Minimal pattern:
 - tag every async op with a generation counter,
 - abort increments the counter,
 - results arriving from older generations are ignored.
+
+---
+
+
+### 9.4 Operational resilience in the EffectRunner (timeouts + retries + breakers + bulkheads)
+
+Budgets (K6) prevent runaway loops. **Resilience patterns** prevent external dependencies from turning a bounded loop into a cascading outage.
+
+This is the recommended layering for any external call (model/tool/policy/persistence):
+
+1) **Bulkhead acquire** (capacity isolation)  
+2) **Circuit breaker allow** (short-circuit if unhealthy)  
+3) **Timeout** (never wait forever)  
+4) **Retry** (bounded + jitter, only for safe/idempotent operations)  
+5) **Record outcome as events** (K9) for audit + debugging  
+
+#### Circuit breaker (reference implementation)
+
+```python
+# kernel_tcb/resilience/breaker.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Literal
+import time
+
+BreakerState = Literal["closed", "open", "half_open"]
+
+class CircuitOpen(RuntimeError):
+    pass
+
+@dataclass(frozen=True)
+class CircuitBreakerConfig:
+    failure_threshold: int = 5          # open after N consecutive failures
+    reset_timeout_sec: float = 30.0     # open -> half_open after timeout
+    half_open_successes: int = 2        # close after N successes in half-open
+
+class CircuitBreaker:
+    def __init__(self, cfg: CircuitBreakerConfig):
+        self._cfg = cfg
+        self._state: BreakerState = "closed"
+        self._failures = 0
+        self._half_open_successes = 0
+        self._open_until = 0.0
+
+    @property
+    def state(self) -> BreakerState:
+        if self._state == "open" and time.monotonic() >= self._open_until:
+            # time-based transition to half-open
+            self._state = "half_open"
+            self._half_open_successes = 0
+        return self._state
+
+    def allow(self) -> None:
+        if self.state == "open":
+            raise CircuitOpen("circuit_open")
+
+    def record_success(self) -> None:
+        if self.state == "half_open":
+            self._half_open_successes += 1
+            if self._half_open_successes >= self._cfg.half_open_successes:
+                self._state = "closed"
+                self._failures = 0
+        else:
+            self._failures = 0
+
+    def record_failure(self) -> None:
+        if self.state == "half_open":
+            self._trip_open()
+            return
+
+        self._failures += 1
+        if self._failures >= self._cfg.failure_threshold:
+            self._trip_open()
+
+    def _trip_open(self) -> None:
+        self._state = "open"
+        self._open_until = time.monotonic() + self._cfg.reset_timeout_sec
+        self._half_open_successes = 0
+```
+
+#### Bulkhead (capacity limiter + bounded queue)
+
+Use a bulkhead whenever calls may block (network I/O, slow tools). At minimum:
+- **per-tenant run limiter**
+- **per-tool limiter**
+- separate pools/limiters for model vs tools vs persistence
+
+```python
+# kernel_tcb/resilience/bulkhead.py
+from __future__ import annotations
+from dataclasses import dataclass
+import threading
+import time
+
+class BulkheadBusy(RuntimeError):
+    pass
+
+@dataclass(frozen=True)
+class BulkheadConfig:
+    max_concurrency: int
+    acquire_timeout_sec: float = 0.0   # 0 => fail fast
+
+class Bulkhead:
+    def __init__(self, cfg: BulkheadConfig):
+        self._cfg = cfg
+        self._sem = threading.Semaphore(cfg.max_concurrency)
+
+    def acquire(self) -> None:
+        if self._cfg.acquire_timeout_sec <= 0:
+            ok = self._sem.acquire(blocking=False)
+        else:
+            ok = self._sem.acquire(timeout=self._cfg.acquire_timeout_sec)
+        if not ok:
+            raise BulkheadBusy("bulkhead_overloaded")
+
+    def release(self) -> None:
+        self._sem.release()
+
+    def __enter__(self) -> "Bulkhead":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.release()
+```
+
+#### EffectRunner integration pattern (single place to enforce it)
+
+```python
+# kernel_tcb/effects/runner.py (illustrative pattern)
+from kernel_tcb.resilience.breaker import CircuitBreaker, CircuitOpen
+from kernel_tcb.resilience.bulkhead import Bulkhead, BulkheadBusy
+
+class DependencyUnavailable(Exception):
+    pass
+
+class ResilienceManager:
+    def __init__(self):
+        self._breakers: dict[str, CircuitBreaker] = {}
+        self._bulkheads: dict[str, Bulkhead] = {}
+
+    def breaker(self, key: str) -> CircuitBreaker:
+        return self._breakers.setdefault(key, CircuitBreaker(CircuitBreakerConfig()))
+
+    def bulkhead(self, key: str) -> Bulkhead:
+        # choose cfg per key (tool/model/persistence)
+        return self._bulkheads.setdefault(key, Bulkhead(BulkheadConfig(max_concurrency=8)))
+
+    def call(self, *, dep_key: str, fn, on_event) :
+        b = self.breaker(dep_key)
+        bh = self.bulkhead(dep_key)
+        try:
+            b.allow()
+            with bh:
+                r = fn()
+            b.record_success()
+            on_event({"kind":"dependency_call_ok","dep":dep_key})
+            return r
+        except (BulkheadBusy, CircuitOpen) as e:
+            on_event({"kind":"dependency_call_short_circuit","dep":dep_key, "reason": type(e).__name__})
+            raise DependencyUnavailable(str(e))
+        except Exception as e:
+            b.record_failure()
+            on_event({"kind":"dependency_call_failed","dep":dep_key, "err": type(e).__name__})
+            raise
+```
+
+**Kernel behavior on `DependencyUnavailable`**
+- Prefer deterministic safe mode (K15) or abort with a typed failure.
+- Do not “route around” safety controls by swapping tools/providers unless you have explicit, policy-reviewed fallback rules.
 
 ---
 
@@ -2102,6 +2659,79 @@ If you move tool execution to separate workers:
 
 This is what makes complete mediation survive distributed systems.
 
+
+### 12.7 Policy specification pattern (composable predicates + explainability)
+
+As policy grows, procedural `if/else` matching becomes brittle and hard to audit. A **specification pattern** turns policy into composable, testable predicates that produce **structured reasons**.
+
+**Design goals:**
+- **Deterministic:** specs are pure; no I/O; no implicit clocks.
+- **Composable:** `ToolAllowlisted.and_(ArgSizeLimit).and_(TenantAllowed)`.
+- **Explainable:** evaluation returns *reason codes* (machine) + detail (human).
+- **Auditable:** the policy decision event logs the failing reason codes.
+
+```python
+# kernel_tcb/policy/specs.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Protocol
+
+@dataclass(frozen=True)
+class Reason:
+    code: str
+    detail: str
+
+@dataclass(frozen=True)
+class SpecResult:
+    ok: bool
+    reasons: tuple[Reason, ...] = ()
+
+class Spec(Protocol):
+    def evaluate(self, ctx: "PolicyContext") -> SpecResult: ...
+
+@dataclass(frozen=True)
+class AndSpec:
+    left: Spec
+    right: Spec
+    def evaluate(self, ctx: "PolicyContext") -> SpecResult:
+        a = self.left.evaluate(ctx)
+        if not a.ok:
+            return a
+        b = self.right.evaluate(ctx)
+        if not b.ok:
+            return b
+        return SpecResult(ok=True)
+
+@dataclass(frozen=True)
+class OrSpec:
+    left: Spec
+    right: Spec
+    def evaluate(self, ctx: "PolicyContext") -> SpecResult:
+        a = self.left.evaluate(ctx)
+        b = self.right.evaluate(ctx)
+        if a.ok or b.ok:
+            return SpecResult(ok=True)
+        return SpecResult(ok=False, reasons=a.reasons + b.reasons)
+```
+
+**Recommended reason codes (examples):**
+- `tool_not_allowlisted`
+- `args_too_large`
+- `resource_not_allowlisted`
+- `risk_tier_too_high`
+- `approval_required`
+- `capability_invalid`
+- `binding_hash_mismatch`
+
+**Integration with capability tokens (§12.6):**
+- Policy evaluation can return `allow` only by producing a **CapabilityGrant** (tool + args hash + scope + expiry + principal + tenant).
+- Tool execution must require the grant token (enforced by the executor), turning policy into a *permit object*.
+
+**Testing discipline:**
+- Each spec has unit tests for pass/fail and reason codes.
+- “Golden policy bundle” tests compile a real policy file → spec tree → decisions match expectations.
+
+
 ## 13. K10 — Outbox (durable intent log for side effects)
 
 A stronger outbox stores **result/error** as well as status.
@@ -2111,19 +2741,33 @@ A stronger outbox stores **result/error** as well as status.
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-Status = Literal["pending","committed","failed"]
+Status = Literal["pending", "in_flight", "delivered", "failed_retryable", "dead_lettered"]
 
 @dataclass(frozen=True)
 class OutboxRecord:
     idempotency_key: str
+    run_id: str
     tool_name: str
     canonical_args_json: str
     status: Status
+
+    # retry / quarantine metadata (DLQ-ready)
+    retry_count: int = 0
+    max_retries: int = 8
+    next_attempt_at: float = 0.0
+
+    last_error_code: str | None = None
+    last_error_json: str | None = None
+    last_error_at: float | None = None
+
     result_json: str | None = None
-    error_json: str | None = None
+
+    dead_lettered_at: float | None = None
+    dead_letter_reason: str | None = None
 
 class Outbox:
     def __init__(self, conn: sqlite3.Connection):
@@ -2131,51 +2775,220 @@ class Outbox:
         self._c.execute(
             "CREATE TABLE IF NOT EXISTS outbox ("
             " idempotency_key TEXT PRIMARY KEY,"
+            " run_id TEXT NOT NULL,"
             " tool_name TEXT NOT NULL,"
             " canonical_args_json TEXT NOT NULL,"
             " status TEXT NOT NULL,"
+            " retry_count INTEGER NOT NULL,"
+            " max_retries INTEGER NOT NULL,"
+            " next_attempt_at REAL NOT NULL,"
+            " last_error_code TEXT,"
+            " last_error_json TEXT,"
+            " last_error_at REAL,"
             " result_json TEXT,"
-            " error_json TEXT"
+            " dead_lettered_at REAL,"
+            " dead_letter_reason TEXT"
             ")"
         )
+        self._c.execute("CREATE INDEX IF NOT EXISTS idx_outbox_status_next ON outbox(status, next_attempt_at)")
+        self._c.commit()
 
     def begin(self, rec: OutboxRecord) -> bool:
+        """Insert if absent. Returns True iff inserted."""
         try:
             self._c.execute(
-                "INSERT INTO outbox (idempotency_key, tool_name, canonical_args_json, status) VALUES (?,?,?,?)",
-                (rec.idempotency_key, rec.tool_name, rec.canonical_args_json, rec.status),
+                "INSERT INTO outbox (idempotency_key, run_id, tool_name, canonical_args_json, status, retry_count, max_retries, next_attempt_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    rec.idempotency_key,
+                    rec.run_id,
+                    rec.tool_name,
+                    rec.canonical_args_json,
+                    rec.status,
+                    rec.retry_count,
+                    rec.max_retries,
+                    rec.next_attempt_at,
+                ),
             )
             self._c.commit()
             return True
         except sqlite3.IntegrityError:
             return False
 
-    def get(self, idempotency_key: str) -> OutboxRecord | None:
-        row = self._c.execute(
-            "SELECT idempotency_key, tool_name, canonical_args_json, status, result_json, error_json FROM outbox WHERE idempotency_key=?",
-            (idempotency_key,),
-        ).fetchone()
-        if row is None:
-            return None
-        return OutboxRecord(*row)
-
-    def mark_committed(self, *, idempotency_key: str, result_json: str) -> None:
+    def mark_delivered(self, *, idempotency_key: str, result_json: str) -> None:
         self._c.execute(
-            "UPDATE outbox SET status='committed', result_json=?, error_json=NULL WHERE idempotency_key=?",
+            "UPDATE outbox SET status='delivered', result_json=?, last_error_code=NULL, last_error_json=NULL, last_error_at=NULL WHERE idempotency_key=?",
             (result_json, idempotency_key),
         )
         self._c.commit()
 
-    def mark_failed(self, *, idempotency_key: str, error_json: str) -> None:
+    def mark_failed_retryable(self, *, idempotency_key: str, error_code: str, error_json: str, backoff_sec: float) -> None:
+        now = time.time()
         self._c.execute(
-            "UPDATE outbox SET status='failed', error_json=?, result_json=NULL WHERE idempotency_key=?",
-            (error_json, idempotency_key),
+            "UPDATE outbox SET status='failed_retryable', retry_count=retry_count+1, last_error_code=?, last_error_json=?, last_error_at=?, next_attempt_at=? "
+            "WHERE idempotency_key=?",
+            (error_code, error_json, now, now + backoff_sec, idempotency_key),
+        )
+        self._c.commit()
+
+    def dead_letter(self, *, idempotency_key: str, reason: str, error_code: str, error_json: str) -> None:
+        now = time.time()
+        self._c.execute(
+            "UPDATE outbox SET status='dead_lettered', dead_lettered_at=?, dead_letter_reason=?, last_error_code=?, last_error_json=?, last_error_at=? "
+            "WHERE idempotency_key=?",
+            (now, reason, error_code, error_json, now, idempotency_key),
         )
         self._c.commit()
 ```
 
 
-### 13.2 Optional: event-sourced run state (append-only stream + snapshots)
+
+
+
+### 13.1 Dead Letter Queue (DLQ) + retry/backoff discipline
+
+Production outboxes must support **bounded retries** and **quarantine**. Otherwise a single “poison” side effect can thrash workers forever, hide real outages, and (worse) create unsafe repeated side effects.
+
+**Minimum schema contract** (already reflected in the `OutboxRecord` above):
+
+- `retry_count`, `max_retries`
+- `next_attempt_at` (for backoff + scheduling)
+- `last_error_code`, `last_error_json`, `last_error_at`
+- `dead_lettered_at`, `dead_letter_reason`
+- `status ∈ {pending, in_flight, delivered, failed_retryable, dead_lettered}`
+
+**Retry classifier (deterministic):**
+
+- **Retryable** (bounded): network timeouts, dependency 429, dependency 5xx, transient DB failures.
+- **Non-retryable** (fail fast → DLQ): policy denied, invalid capability token, approval binding mismatch, schema violation, invariant violation, dependency 4xx (except 429) unless explicitly allowlisted.
+
+**Backoff policy (default):**
+- exponential with jitter, capped (e.g., 0.5s → 60s), but *jitter generation must be deterministic in tests* (seeded RNG provided by the kernel runtime).
+
+**Quarantine / DLQ behavior:**
+- Once `retry_count >= max_retries`, the item is **dead-lettered** and must never be executed again automatically.
+- Dead-lettering emits:
+  - `outbox.dead_lettered` (audit) with `idempotency_key`, `tool_name`, `error_code`, `reason`.
+- Operators can “requeue” only via an explicit admin path that:
+  - emits `outbox.requeued` (audit),
+  - preserves idempotency semantics (no silent duplication),
+  - requires a principal and justification.
+
+**Alerting + SLOs (required):**
+- Metrics:
+  - `outbox_pending_total{tool_name}`
+  - `outbox_retry_total{tool_name,error_code}`
+  - `outbox_dead_letter_total{tool_name,reason}`
+  - `outbox_oldest_pending_seconds`
+- Page on:
+  - sustained dead-letter rate,
+  - oldest pending over threshold,
+  - spikes in a single error code/tool.
+
+**Optional hardening (recommended): poison-message acceleration**
+- If the same `error_code` repeats N times (e.g., schema_violation), dead-letter early (don’t waste retries).
+
+
+### 13.2 Saga pattern (multi-step commits with compensations)
+
+Use a saga when a “single user action” produces **multiple external side effects** that must remain coherent under partial failure.
+
+Classic examples:
+- reserve inventory → charge payment → create shipment
+- create ticket → update CRM → notify customer
+
+There is no true distributed transaction here. The goal is:
+- **idempotent progress**, persisted step-by-step,
+- **compensations** when a later step fails,
+- deterministic **crash/resume** that continues from the recorded saga state.
+
+#### When you need a saga (rule of thumb)
+
+Use a saga if:
+- you have 2+ side-effecting tool commits that must be “all-or-compensate”, and
+- the downstream systems do not provide a single atomic API that covers the whole intent.
+
+If you cannot define a meaningful compensation, you can still run a “non-compensatable saga” but you must:
+- mark it as such in policy,
+- alert on partial failure,
+- provide a manual remediation path.
+
+#### Deterministic saga state machine (KernelCore-owned)
+
+Model saga progress inside KernelCore (pure-ish) so it is replayable:
+
+```python
+# kernel_tcb/sagas/abi.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any, Optional
+
+@dataclass(frozen=True)
+class SagaStep:
+    name: str
+    do_tool: str
+    do_args: dict[str, Any]
+    compensate_tool: Optional[str] = None
+    compensate_args: Optional[dict[str, Any]] = None
+
+@dataclass
+class SagaState:
+    saga_id: str
+    step_index: int = 0
+    completed: list[str] = None
+    status: str = "running"   # running|compensating|done|failed
+
+    def __post_init__(self):
+        if self.completed is None:
+            self.completed = []
+```
+
+KernelCore emits effects for the next step (or compensation) based on `SagaState` and tool results.
+
+#### Outbox integration (idempotent step commits)
+
+Each saga step is a **separate outbox record** with its own idempotency key.
+
+Recommended idempotency key template:
+
+```
+saga:{saga_id}:step:{step_name}:phase:{do|compensate}
+```
+
+This guarantees:
+- crash between “record intent” and “execute tool” does not duplicate side effects,
+- retries remain bounded and safe.
+
+#### Compensation flow (reverse order)
+
+On failure at step N:
+1) transition saga to `compensating`
+2) emit compensation effects for steps `N-1 ... 0` (only for steps recorded as committed)
+3) if all compensations succeed → saga ends `failed` (original intent failed, but we cleaned up)
+4) if a compensation fails → saga ends `failed` and raises an alert (manual remediation required)
+
+#### Policy + capability tokens (no bypass)
+
+Each `do` and `compensate` tool execution still goes through:
+- preview/allow/approve (as configured),
+- capability minting,
+- token verification at ToolExecutor.
+
+Compensations should typically be pre-authorized by policy for the saga type (otherwise you can’t roll back in emergencies).
+
+#### Minimum saga events (if event-sourcing is enabled)
+
+If you adopt §13.3 event sourcing, include explicit saga events:
+- `saga_started {saga_id, steps_hash}`
+- `saga_step_committed {saga_id, step_name, outbox_key}`
+- `saga_step_failed {saga_id, step_name, error}`
+- `saga_compensation_committed {saga_id, step_name, outbox_key}`
+- `saga_completed {saga_id, status}`
+
+This makes time-travel debugging and post-incident analysis actually usable.
+
+
+### 13.3 Optional: event-sourced run state (append-only stream + snapshots)
 
 If you want the “single coherent story” property:
 
@@ -2319,7 +3132,7 @@ def apply_event(s: DerivedRunState, *, event_type: str, payload: dict[str, Any])
 
 **Integration note:** you can implement the outbox as:
 - a *derived view* of events (“intent recorded”, “intent committed”), or
-- a separate table (as shown in §13.1) updated transactionally alongside the event append.
+- a separate table (as shown in §13 (Outbox)) updated transactionally alongside the event append.
 
 Both are fine; choose based on operational comfort.
 
@@ -2584,7 +3397,7 @@ This section exists because “we built it correctly” is not a property you ca
 
 A production-grade agent kernel should have a small set of **must-pass proofs** that demonstrate the *kernel invariants are mechanically enforced*.
 
-### 21.1 The four must-pass end-to-end proofs
+### 21.1 Must-pass end-to-end proofs
 
 #### Proof A — Deterministic replay (no external calls)
 
@@ -2643,6 +3456,51 @@ Required tests:
 - `test_resume_does_not_duplicate_side_effect`
 - `test_outbox_idempotency_key_stable_across_retries`
 
+
+#### Proof E — Outbox DLQ (bounded retries + quarantine)
+
+Goal: prove the outbox cannot retry forever and that toxic side effects become **operable** rather than **infinite background pain**.
+
+Scenario:
+- Configure a deterministic failing tool adapter that returns:
+  - a retryable failure for repeated attempts (e.g., `dependency_timeout`),
+  - a non-retryable failure (e.g., `schema_violation` / `capability_invalid`).
+
+Assertions:
+- Retryable failures:
+  - increment `retry_count`,
+  - schedule `next_attempt_at` with backoff,
+  - stop after `max_retries` and transition to `dead_lettered`.
+- Non-retryable failures:
+  - transition to `dead_lettered` immediately (fail closed).
+- Dead-lettered records:
+  - are never executed automatically again,
+  - emit `outbox.dead_lettered` audit events with reason codes.
+
+Required tests:
+- `test_outbox_retries_are_bounded_and_dead_lettered`
+- `test_non_retryable_errors_dead_letter_immediately`
+- `test_dead_lettered_items_are_not_executed`
+
+#### Proof F — Audit read path + verify_chain (usable and verifiable audit)
+
+Goal: prove audit is not just “write-only vibes.”
+
+Scenario:
+- Run a normal execution emitting multiple audit events (policy decisions, effects, tool commits).
+- Read via `query(run_id, after_seq)` pagination and assert ordering is stable.
+- Run `verify_chain(run_id)` and assert `ok=True`.
+
+Tamper test:
+- Flip one stored audit payload field (simulated corruption or malicious edit).
+- Assert `verify_chain(run_id)` returns `ok=False` and points to the first bad sequence.
+
+Required tests:
+- `test_audit_query_paginates_in_order`
+- `test_audit_verify_chain_passes`
+- `test_audit_verify_chain_detects_tamper`
+
+
 ### 21.2 CI/CD release gates (minimum bar)
 
 A sane default pipeline:
@@ -2659,6 +3517,10 @@ A sane default pipeline:
 
 These tests are cheap and catch real incidents early:
 
+- Outbox poison item (non-retryable invariant violation) → immediate DLQ; no worker thrash.
+- Audit store corruption simulation → `verify_chain` trips and identifies first bad seq.
+- Summary signing key rotation → new `kid` verifies; old runs still verifiable with old keys.
+
 - Kill strategy process mid-propose → kernel fails closed, run is resumable.
 - Policy engine timeout/unavailable → default deny; run pauses or fails safe (per config).
 - Tool adapter timeout → outbox retry behavior matches policy; no duplicate side effects.
@@ -2674,6 +3536,104 @@ Add regression cases for:
 - Tool args canonicalization edge cases (ordering, floats, unicode normalization).
 
 The vibe you’re aiming for: **the system refuses weirdness by construction, not by heroism.**
+
+
+### 21.5 Operational resilience + extensibility proofs (recommended for production)
+
+These aren’t “nice to have.” They stop the common production incidents: cascading failure, stuck capacity, and unsafe extension drift.
+
+#### Proof G — Global tamper evidence (signed run summaries + global chain)
+
+Goal: detect run deletion/replacement and produce portable evidence.
+
+Scenario:
+- Complete two runs and record:
+  - signed run summaries (`kid`, signature),
+  - appended global chain records.
+
+Assertions:
+- Summary signature verifies under the `kid`.
+- Global chain verifies end-to-end (`prev_global_hash` links).
+- If anchoring is enabled, anchored head matches computed head for the same interval.
+
+Deletion detection:
+- Remove one summary or one global chain record (simulated tamper).
+- Assert verification fails.
+
+Required tests:
+- `test_run_summary_signature_verifies`
+- `test_global_chain_verifies`
+- `test_global_chain_detects_deletion_or_gap`
+
+
+
+#### Proof H — Circuit breaker behavior (trip, short-circuit, recover)
+
+Goal: prove the system *stops calling* a failing dependency and recovers predictably.
+
+Scenario:
+- Configure a tool adapter to fail N times.
+- Verify:
+  - breaker transitions to `open`,
+  - subsequent calls are short-circuited (no adapter invocation),
+  - after `reset_timeout_sec`, breaker enters `half_open`,
+  - after M successes, breaker closes.
+
+Required tests:
+- `test_circuit_breaker_opens`
+- `test_circuit_breaker_short_circuits_calls`
+- `test_circuit_breaker_recovers_half_open_to_closed`
+
+#### Proof I — Bulkhead isolation (no cascading starvation)
+
+Goal: prove one saturated dependency cannot starve unrelated kernel work.
+
+Scenario:
+- Saturate `tool:A` bulkhead (max_concurrency reached).
+- Verify:
+  - `tool:B` calls still execute,
+  - audit/checkpoint writes still proceed,
+  - overloaded calls fail fast with typed overload errors (no unbounded queue growth).
+
+Required tests:
+- `test_bulkhead_isolates_tools`
+- `test_bulkhead_overload_fails_fast`
+- `test_model_and_tool_pools_are_isolated` (if you have separate pools)
+
+#### Proof J — Saga compensation (partial failure produces compensations)
+
+Goal: prove multi-step actions remain coherent under failure.
+
+Scenario:
+- Run a saga with 3 steps; force step 2 to fail after step 1 commits.
+- Verify:
+  - step 1 outbox record is committed,
+  - compensation for step 1 is executed and recorded,
+  - saga ends in `failed` with a clear event trail,
+  - resume does not duplicate either the original side effect or the compensation.
+
+Required tests:
+- `test_saga_compensates_on_failure`
+- `test_saga_resume_is_idempotent`
+
+#### Proof K — Extension contract tests (plugins don’t widen the trust boundary)
+
+Goal: prove new tools/verifiers can be added without breaking invariants.
+
+Scenario:
+- Load a tool pack via registry.
+- Verify:
+  - schema validation rejects invalid args,
+  - canonicalization is stable,
+  - capability tokens are required for commits,
+  - record/replay mode blocks live calls.
+
+Required tests:
+- `test_tool_pack_contract_suite`
+- `test_extension_loading_rejects_duplicate_names`
+- `test_extension_does_not_import_tcb_forbidden_modules` (static guard)
+
+---
 
 ## Appendix A — Policy bundle skeleton (data-only)
 
@@ -2723,6 +3683,7 @@ This is the “index card” version. The full must-pass proofs are in §21.
   - `test_tool_args_schema_validation`
   - `test_idempotency_key_kernel_generated`
   - `test_tool_timeout_is_typed_error`
+  - `test_tool_pack_contract_suite`
 - **K5 (policy/reference monitor)**
   - `test_default_deny`
   - `test_two_phase_preview_then_commit`
@@ -2731,6 +3692,10 @@ This is the “index card” version. The full must-pass proofs are in §21.
   - `test_budget_enforced`
   - `test_retry_bounds_enforced`
   - `test_overload_fails_fast`
+  - `test_circuit_breaker_opens`
+  - `test_circuit_breaker_recovers_half_open_to_closed`
+  - `test_bulkhead_isolates_tools`
+  - `test_bulkhead_overload_fails_fast`
 - **K7 (verifiers)**
   - `test_verifier_veto_blocks_execution`
 - **K9 (audit ledger)**
@@ -2739,6 +3704,8 @@ This is the “index card” version. The full must-pass proofs are in §21.
 - **K10 (outbox/idempotency)**
   - `test_resume_does_not_duplicate_side_effect`
   - `test_outbox_deduplication`
+  - `test_saga_compensates_on_failure`
+  - `test_saga_resume_is_idempotent`
 - **K11 (record/replay)**
   - `test_replay_blocks_external_calls`
   - `test_replay_produces_same_state_hash`
@@ -2753,10 +3720,10 @@ This is the “index card” version. The full must-pass proofs are in §21.
 - K3: prompt hash recorded; structured output repair bounded; oversize fails closed
 - K4: args validated; idempotency key kernel-generated; timeouts typed
 - K5: default deny; two-phase; binding hash; TOCTOU safe
-- K6: budgets; retry bounds; circuit breaker
+- K6: budgets; retry bounds; circuit breaker; bulkhead isolation
 - K7: verifier veto path exercised
 - K9: redaction before write; hash chain verifies
-- K10: resume does not duplicate side effects
+- K10: resume does not duplicate side effects; saga step idempotency/compensation
 - K18: untrusted content never enters instruction channel
 
 ---
