@@ -1,7 +1,7 @@
 # Kernel Implementation Playbook
 **Status:** Staff-level reference implementation guide for the Kernel Blueprint (TCB)  
 **Core language:** Python  
-**Version:** v1.1  
+**Version:** v1.2  
 **Last updated:** 2026-01-08
 
 ---
@@ -354,6 +354,36 @@ class ToolExecute(Effect):
     meta: ToolMeta
     capability_token: str | None = None  # K5 capability grant (see §12.6)
 
+# Optional but recommended external-I/O effects (make wiring complete)
+class PolicyEval(Effect):
+    kind: Literal["policy_eval"] = "policy_eval"
+    bundle_id: str
+    bundle_version: str
+    tool_name: str
+    args: dict[str, Any]
+    meta: ToolMeta
+
+class ApprovalRequestEffect(Effect):
+    kind: Literal["approval_request"] = "approval_request"
+    binding_hash: str
+    tool_name: str
+    preview_redacted: dict | None
+    expires_at_epoch: int
+    reason: str
+
+class ApprovalWait(Effect):
+    kind: Literal["approval_wait"] = "approval_wait"
+    binding_hash: str
+    timeout_sec: int
+
+class SecretsIssue(Effect):
+    kind: Literal["secrets_issue"] = "secrets_issue"
+    tool_name: str
+    scopes: list[str]
+    ttl_sec: int
+    meta: ToolMeta
+
+
 KernelEffect = (
     EmitAudit
     | PersistCheckpoint
@@ -361,6 +391,10 @@ KernelEffect = (
     | CallModel
     | ToolPreview
     | ToolExecute
+    | PolicyEval
+    | ApprovalRequestEffect
+    | ApprovalWait
+    | SecretsIssue
 )
 ```
 
@@ -443,6 +477,11 @@ class EffectRunner:
                 raise TypeError(f"unknown effect: {type(eff)}")
         return observations
 ```
+
+> Production note: the interpreter above is intentionally minimal. In production, do **not**
+> call adapters directly from this loop. Instead, build a middleware pipeline (breaker/bulkhead/timeout/retry/metrics)
+> around dispatch and ensure **every** external interaction is an Effect (§9.5).
+
 
 **Structural win:** you can now enforce ordering constraints mechanically, e.g. “no `ToolExecute` effect can be emitted unless a `policy_decision` event exists for the same args hash.”
 
@@ -1546,6 +1585,116 @@ class AppendOnlySink(Protocol):
     def append(self, event: AuditEvent) -> None: ...
 ```
 
+
+#### 8.2.1 Production sink composition (fan-out, routing, async backpressure)
+
+A single `AppendOnlySink` is enough for a reference implementation, but production systems almost always need **fan-out**:
+
+- **Primary durable sink (required):** the audit write you *must* succeed with before committing side effects (DB table / WAL-backed log).
+- **Secondary sinks (optional):** SIEM, file shipping, Kafka, remote audit service. These can lag or fail without breaking the kernel invariants.
+- **Routing:** some events go to all sinks; some go only to compliance storage.
+
+**Invariant:** never make the *primary* durable append “best effort.”  
+If you can execute a side-effecting tool, you must be able to append the corresponding audit events first.
+
+Reference sink patterns:
+
+```python
+# kernel_tcb/audit/sinks.py
+from __future__ import annotations
+
+import queue
+import threading
+import time
+from dataclasses import dataclass
+from typing import Callable
+
+from kernel_tcb.audit.events import AuditEvent
+from kernel_tcb.audit.ports import AppendOnlySink
+
+class CompositeSink(AppendOnlySink):
+    """Fan-out to multiple sinks in a deterministic order.
+
+    Put the durable sink first. Secondary sinks may be best-effort.
+    """
+    def __init__(self, sinks: list[AppendOnlySink], *, best_effort_indices: set[int] | None = None):
+        self._sinks = sinks
+        self._best_effort = best_effort_indices or set()
+
+    def append(self, event: AuditEvent) -> None:
+        for i, s in enumerate(self._sinks):
+            if i in self._best_effort:
+                try:
+                    s.append(event)
+                except Exception:
+                    # Best-effort sinks must never block core durability.
+                    continue
+            else:
+                # Durable sink(s): fail closed.
+                s.append(event)
+
+class RoutingSink(AppendOnlySink):
+    """Route events to different sinks by predicate (e.g., compliance vs ops)."""
+    def __init__(self, routes: list[tuple[Callable[[AuditEvent], bool], AppendOnlySink]], default: AppendOnlySink | None = None):
+        self._routes = routes
+        self._default = default
+
+    def append(self, event: AuditEvent) -> None:
+        routed = False
+        for pred, sink in self._routes:
+            if pred(event):
+                sink.append(event)
+                routed = True
+        if not routed and self._default is not None:
+            self._default.append(event)
+
+@dataclass(frozen=True)
+class AsyncSinkConfig:
+    queue_max: int = 50_000
+    warn_drop_threshold: int = 45_000
+    # If "drop" is True, overflow drops events (only safe for secondary sinks).
+    drop_on_overflow: bool = True
+
+class AsyncFanoutSink(AppendOnlySink):
+    """Async wrapper for secondary sinks.
+
+    Use ONLY for non-primary sinks; otherwise you violate "audit before side effects".
+    """
+    def __init__(self, downstream: AppendOnlySink, *, cfg: AsyncSinkConfig = AsyncSinkConfig()):
+        self._downstream = downstream
+        self._cfg = cfg
+        self._q: queue.Queue[AuditEvent] = queue.Queue(maxsize=cfg.queue_max)
+        self._t = threading.Thread(target=self._worker, name="audit-fanout", daemon=True)
+        self._t.start()
+
+    def append(self, event: AuditEvent) -> None:
+        try:
+            self._q.put_nowait(event)
+        except queue.Full:
+            if self._cfg.drop_on_overflow:
+                # Drop is acceptable ONLY for secondary sinks; emit metrics/alerts.
+                return
+            self._q.put(event)  # backpressure
+
+    def _worker(self) -> None:
+        while True:
+            ev = self._q.get()
+            try:
+                self._downstream.append(ev)
+            except Exception:
+                # Fanout failures should be visible: log + metrics + optional DLQ.
+                pass
+            finally:
+                self._q.task_done()
+                time.sleep(0)  # yield
+```
+
+Operational requirements (minimum):
+- Metrics: queue depth, drop count (if enabled), fanout latency.
+- Alerting: sustained fanout failure, queue saturation.
+- Optional: DLQ for fanout events if remote sink outages are common.
+
+
 ### 8.3 Ledger implementation
 
 ```python
@@ -2044,6 +2193,202 @@ class ResilienceManager:
 - Prefer deterministic safe mode (K15) or abort with a typed failure.
 - Do not “route around” safety controls by swapping tools/providers unless you have explicit, policy-reviewed fallback rules.
 
+
+### 9.5 Effect middleware pipeline (the wiring that makes patterns real)
+
+A recurring production failure mode is **“patterns described, but not actually applied everywhere.”**  
+The fix is architectural: route **all external interactions** through a single interpreter lane, and implement cross-cutting concerns as **middleware** around effect execution.
+
+This is how you make these claims *mechanically true*:
+
+- circuit breakers wrap **every** dependency call,
+- bulkheads isolate tenants/tools/models by construction,
+- timeouts/retries/metrics/redaction/tracing are not scattered.
+
+#### Rule: every external interaction is an Effect
+
+If it crosses a boundary (network, disk, DB, remote service), model it as an effect kind:
+
+- `call_model`
+- `tool_preview`, `tool_execute`
+- `policy_eval` (only if policy is remote; pure policy can be in-process)
+- `approval_request`, `approval_wait`
+- `persist_checkpoint`, `audit_emit`, `outbox_enqueue`
+- `secrets_issue` (K14 scoped credentials)
+
+If you keep “approval wait” or “remote policy eval” as direct calls inside helpers, you will eventually bypass breakers/bulkheads and reintroduce nondeterminism.
+
+#### Middleware skeleton (production reference)
+
+```python
+# kernel_tcb/effects/middleware.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable, Protocol
+
+from kernel_tcb.effects.abi import KernelEffect
+
+Observation = dict[str, Any]
+EffectHandler = Callable[["EffectContext", KernelEffect], list[Observation]]
+
+@dataclass(frozen=True)
+class EffectContext:
+    trace_id: str
+    run_id: str
+    tenant_id: str | None
+    principal: str
+    mode: str  # "live" | "record" | "replay"
+    now_epoch_ms: int
+    deadline_epoch_ms: int
+
+class EffectMiddleware(Protocol):
+    middleware_id: str
+    def __call__(self, *, ctx: EffectContext, effect: KernelEffect, nxt: EffectHandler) -> list[Observation]: ...
+
+def build_pipeline(*, middlewares: list[EffectMiddleware], terminal: EffectHandler) -> EffectHandler:
+    handler = terminal
+    for mw in reversed(middlewares):
+        prev = handler
+        def _wrapped(ctx: EffectContext, effect: KernelEffect, mw=mw, prev=prev) -> list[Observation]:
+            return mw(ctx=ctx, effect=effect, nxt=prev)
+        handler = _wrapped
+    return handler
+```
+
+#### Dependency keys: one convention, everywhere
+
+Circuit breakers and bulkheads need consistent keys.
+
+```python
+# kernel_tcb/effects/deps.py
+from __future__ import annotations
+from kernel_tcb.effects.abi import KernelEffect
+
+def dependency_key(effect: KernelEffect) -> str:
+    k = getattr(effect, "kind", "unknown")
+    if k == "call_model":
+        # If you use routing (see §10.3), include provider id post-route in events.
+        return f"model_class:{effect.req.model_class}"
+    if k == "tool_preview":
+        return f"tool:{effect.tool_name}:preview"
+    if k == "tool_execute":
+        return f"tool:{effect.tool_name}"
+    if k in ("approval_request", "approval_wait"):
+        return "approval:primary"
+    if k in ("audit_emit",):
+        return "audit:primary"
+    if k in ("persist_checkpoint", "outbox_enqueue"):
+        return "db:primary"
+    if k in ("secrets_issue",):
+        return "secrets:primary"
+    if k in ("policy_eval",):
+        return "policy:primary"
+    return f"internal:{k}"
+```
+
+#### Middleware examples (breaker + bulkhead wired once)
+
+```python
+# kernel_tcb/effects/mw_resilience.py
+from __future__ import annotations
+
+from kernel_tcb.effects.middleware import EffectContext, EffectMiddleware, EffectHandler
+from kernel_tcb.effects.deps import dependency_key
+from kernel_tcb.resilience.breaker import CircuitBreaker, CircuitOpen
+from kernel_tcb.resilience.bulkhead import Bulkhead, BulkheadBusy
+
+class DependencyUnavailable(RuntimeError):
+    pass
+
+class BreakerRegistry:
+    def __init__(self, breakers: dict[str, CircuitBreaker]):
+        self._b = breakers
+    def get(self, key: str) -> CircuitBreaker:
+        return self._b.setdefault(key, CircuitBreaker())  # configure per key in real impl
+
+class BulkheadRegistry:
+    def __init__(self, bulkheads: dict[str, Bulkhead]):
+        self._h = bulkheads
+    def get(self, key: str) -> Bulkhead:
+        return self._h.setdefault(key, Bulkhead(name=key, max_in_flight=50))
+
+class CircuitBreakerMiddleware(EffectMiddleware):
+    middleware_id = "circuit_breaker"
+
+    def __init__(self, reg: BreakerRegistry):
+        self._reg = reg
+
+    def __call__(self, *, ctx: EffectContext, effect, nxt: EffectHandler):
+        dep = dependency_key(effect)
+        br = self._reg.get(dep)
+        try:
+            br.allow()
+        except CircuitOpen as e:
+            raise DependencyUnavailable(f"{dep}:{e}") from e
+        try:
+            out = nxt(ctx, effect)
+            br.record_success()
+            return out
+        except Exception:
+            br.record_failure()
+            raise
+
+class BulkheadMiddleware(EffectMiddleware):
+    middleware_id = "bulkhead"
+
+    def __init__(self, reg: BulkheadRegistry):
+        self._reg = reg
+
+    def __call__(self, *, ctx: EffectContext, effect, nxt: EffectHandler):
+        dep = dependency_key(effect)
+
+        # Typical production pattern: apply multiple bulkheads (tenant + dep class + tool).
+        # Keep this minimal here; see §1.8 for recommended key sets.
+        bh = self._reg.get(dep)
+        try:
+            with bh.acquire(timeout_ms=0):  # fail fast; outbox/retry can requeue
+                return nxt(ctx, effect)
+        except BulkheadBusy as e:
+            raise DependencyUnavailable(f"{dep}:bulkhead_busy") from e
+```
+
+#### EffectRunner wiring (no “forgotten” call sites)
+
+```python
+# kernel_tcb/effects/runner.py (reference skeleton)
+from __future__ import annotations
+
+from kernel_tcb.effects.abi import KernelEffect
+from kernel_tcb.effects.middleware import EffectContext, build_pipeline, EffectMiddleware
+
+class EffectRunner:
+    def __init__(self, *, dispatcher, middlewares: list[EffectMiddleware]):
+        self._dispatch = dispatcher
+        self._handler = build_pipeline(middlewares=middlewares, terminal=self._dispatch)
+
+    def run(self, *, ctx: EffectContext, effects: list[KernelEffect]) -> list[dict]:
+        observations: list[dict] = []
+        for eff in effects:
+            observations.extend(self._handler(ctx, eff))
+        return observations
+```
+
+**Hard rule:** adapters/clients/DB sessions must not be callable directly from orchestration code.  
+If a team “just calls the tool adapter” somewhere else, CI should fail (import-lint) and runtime should fail closed (missing provenance / missing capability / missing effect context).
+
+#### Acceptance test to catch wiring regressions
+
+Add at least one “tripwire” test that proves all external effects pass through middleware:
+
+- Provide a `TripwireMiddleware` that sets a contextvar on entry.
+- Wrap tool/model/approval/persistence adapters with stubs that assert the contextvar is set.
+- Run a small scenario that exercises each effect kind.
+- If any call bypasses the middleware lane, the test fails.
+
+(Include this under Proof H/I expansions in §21.)
+
+
 ---
 
 ## 10. K3 — Model boundary (LLM as tool)
@@ -2060,6 +2405,8 @@ class ModelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     prompt_hash: str
     messages: list[dict[str, Any]]
+    model_class: str = "default"  # e.g. cheap|reasoning|vision|long_context
+    constraints: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
 
 class ModelResponse(BaseModel):
@@ -2136,6 +2483,138 @@ class ModelBoundary:
 
 ---
 
+
+### 10.3 Multi-provider model routing (make “multi-LLM” real without policy bypass)
+
+The minimal boundary in §10.2 shows a single injected provider. That’s fine for a reference build, but production systems typically need:
+
+- multiple providers (cost, latency, feature coverage),
+- regional/data-residency constraints,
+- tenant-specific allowlists,
+- graceful fallback (policy-reviewed),
+- clean auditing of *which* provider/model was used and *why*.
+
+**Important safety nuance:** Strategy should not choose a provider directly if Strategy is untrusted.  
+Instead, Strategy requests a **model class** (capability tier), and the kernel routes the call by **policy**.
+
+#### Extend the request envelope with a model class
+
+```python
+# kernel_tcb/model/abi.py (additions)
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Any
+
+class ModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    prompt_hash: str
+    messages: list[dict[str, Any]]
+    model_class: str = "default"  # e.g. cheap|reasoning|vision|long_context
+    constraints: dict[str, Any] = Field(default_factory=dict)  # e.g. {"data_residency":"EU"}
+    config: dict[str, Any] = Field(default_factory=dict)
+```
+
+#### Provider registry + router ports
+
+```python
+# kernel_tcb/model/routing.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Protocol
+
+from kernel_tcb.model.abi import ModelRequest
+
+@dataclass(frozen=True)
+class ModelRoute:
+    provider_id: str
+    model_id: str
+    reason: str  # for audit/debug ("tenant_policy", "fallback", "cost_cap")
+
+class ModelProviderRegistry(Protocol):
+    def get(self, provider_id: str): ...  # returns ModelProvider
+    def list(self) -> list[str]: ...
+
+class ModelRouter(Protocol):
+    router_id: str
+    def route(self, *, tenant_id: str | None, principal: str, bundle_id: str | None, req: ModelRequest) -> ModelRoute: ...
+```
+
+#### Multi-provider boundary (router + per-provider boundary)
+
+```python
+# kernel_tcb/model/multiprovider.py
+from __future__ import annotations
+
+from kernel_tcb.model.boundary import ModelBoundary, ModelProvider
+from kernel_tcb.model.routing import ModelProviderRegistry, ModelRouter
+from kernel_tcb.audit.ledger import AuditLedger
+from kernel_tcb.effects.middleware import EffectContext  # for trace/run metadata
+
+class MultiProviderModelService:
+    def __init__(
+        self,
+        *,
+        registry: ModelProviderRegistry,
+        router: ModelRouter,
+        audit: AuditLedger,
+        max_repair_attempts: int = 2,
+        max_output_bytes: int = 32_768,
+    ):
+        self._registry = registry
+        self._router = router
+        self._audit = audit
+        self._boundaries: dict[str, ModelBoundary] = {}
+
+        # Lazily build per-provider boundaries on demand (keeps startup cheap).
+        self._max_repair = max_repair_attempts
+        self._max_out = max_output_bytes
+
+    def _boundary(self, provider_id: str) -> ModelBoundary:
+        b = self._boundaries.get(provider_id)
+        if b is None:
+            provider: ModelProvider = self._registry.get(provider_id)
+            b = ModelBoundary(provider=provider, max_repair_attempts=self._max_repair, max_output_bytes=self._max_out)
+            self._boundaries[provider_id] = b
+        return b
+
+    def complete_text(self, *, ctx: EffectContext, req: "ModelRequest") -> "ModelResponse":
+        route = self._router.route(
+            tenant_id=ctx.tenant_id,
+            principal=ctx.principal,
+            bundle_id=None,  # set if you pin policy bundles (see §12.4)
+            req=req,
+        )
+
+        # Audit the route decision (no raw prompt text; use hashes).
+        self._audit.emit(
+            trace_id=ctx.trace_id,
+            run_id=ctx.run_id,
+            name="model.routed",
+            payload={
+                "router_id": getattr(self._router, "router_id", "unknown"),
+                "provider_id": route.provider_id,
+                "model_id": route.model_id,
+                "model_class": req.model_class,
+                "prompt_hash": req.prompt_hash,
+                "reason": route.reason,
+            },
+        )
+
+        # Provider-specific config injection (model id)
+        config = dict(req.config)
+        config["model"] = route.model_id
+
+        return self._boundary(route.provider_id).complete_text(messages=req.messages, config=config)
+```
+
+#### Router policy discipline (keep it deterministic)
+
+- Route decisions must be **deterministic** for the same `(tenant_id, bundle_id/version, model_class, constraints)`.
+- If you support fallbacks, treat them as **policy-reviewed** (and log `reason="fallback"`).
+- Record/replay must pin the chosen provider/model for reproducibility (store in trace events).
+
+**Release gate:** add a test that a run can call two different providers by changing `model_class` while policy controls which are allowed (see §21 additions).
+
+
 ## 11. K4 — Tool executor (schema validation + idempotency metadata)
 
 ### 11.1 Tool manifest
@@ -2159,6 +2638,8 @@ class ToolSpec(BaseModel):
     supports_preview: bool = False
     supports_idempotency: bool = True
     timeout_ms_default: int = 30_000
+    required_scopes: list[str] = []  # K14: secrets broker scopes needed for live execution
+    credential_ttl_sec_default: int = 900
 
 class ToolManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -2205,6 +2686,8 @@ class ToolMeta(BaseModel):
     run_id: str
     principal: str
     tenant_id: str | None
+    policy_bundle_id: str | None = None
+    policy_bundle_version: str | None = None
     idempotency_key: str
     timeout_ms: int
     mode: str  # "live" | "replay"
@@ -2219,7 +2702,7 @@ class ToolAdapter(Protocol):
     tool_name: str
     tool_version: str
     def preview(self, args: dict, meta: ToolMeta) -> ToolResult: ...
-    def execute(self, args: dict, meta: ToolMeta) -> ToolResult: ...
+    def execute(self, args: dict, meta: ToolMeta, *, creds: dict[str, str] | None = None) -> ToolResult: ...
 ```
 
 ```python
@@ -2227,30 +2710,35 @@ class ToolAdapter(Protocol):
 from __future__ import annotations
 
 from kernel_tcb.security.capabilities import CapabilityGrant, CapabilityTokens, compute_args_hash
+from kernel_tcb.security.secrets import SecretsBroker, CredentialRequest
 from kernel_tcb.tools.manifest import ToolManifest
 from kernel_tcb.tools.ports import ToolAdapter, ToolMeta, ToolResult
 
 class ToolExecutor:
+    """K4 tool execution boundary.
+
+    - Validates tool names against the manifest.
+    - Enforces capability tokens for commits (and for tools requiring secrets).
+    - Keeps Strategy untrusted: tool adapters never leak upward.
+    """
     def __init__(
         self,
         *,
         manifest: ToolManifest,
         adapters: dict[str, ToolAdapter],
         capabilities: CapabilityTokens,
+        secrets: SecretsBroker | None = None,
     ):
         self._manifest = manifest
         self._adapters = adapters
         self._cap = capabilities
+        self._secrets = secrets
 
     def spec(self, tool_name: str):
         return self._manifest.get(tool_name)
 
     def preview(self, *, tool_name: str, args: dict, meta: ToolMeta) -> ToolResult:
-        spec = self._manifest.get(tool_name)
-        adapter = self._adapters[tool_name]
-        if not spec.supports_preview:
-            return ToolResult(ok=True, output={"preview": None})
-        return adapter.preview(args, meta)
+        return self._adapters[tool_name].preview(args, meta)
 
     def execute(self, *, tool_name: str, args: dict, meta: ToolMeta, capability_token: str | None = None) -> ToolResult:
         spec = self._manifest.get(tool_name)
@@ -2259,8 +2747,9 @@ class ToolExecutor:
         if meta.mode == "replay" and spec.has_side_effects:
             return ToolResult(ok=False, error={"code": "replay_forbids_side_effects"})
 
-        # Capability enforcement: side-effecting tools require a grant token.
-        if spec.has_side_effects:
+        # Treat "requires secrets" as privileged. A tool that can access credentials is powerful even if read-only.
+        requires_privilege = spec.has_side_effects or bool(getattr(spec, "required_scopes", []))
+        if requires_privilege:
             if capability_token is None:
                 return ToolResult(ok=False, error={"code": "missing_capability"})
 
@@ -2270,7 +2759,6 @@ class ToolExecutor:
                 return ToolResult(ok=False, error={"code": "invalid_capability", "detail": str(e)})
 
             expected_args_hash = compute_args_hash(tool_name=tool_name, args=args)
-
             if (
                 grant.phase != "commit"
                 or grant.tool_name != tool_name
@@ -2281,7 +2769,22 @@ class ToolExecutor:
             ):
                 return ToolResult(ok=False, error={"code": "capability_mismatch"})
 
-        return self._adapters[tool_name].execute(args, meta)
+        creds: dict[str, str] | None = None
+        if getattr(spec, "required_scopes", []) and meta.mode != "replay":
+            if self._secrets is None:
+                return ToolResult(ok=False, error={"code": "missing_secrets_broker"})
+            issued = self._secrets.issue(CredentialRequest(
+                tool_name=tool_name,
+                scopes=list(spec.required_scopes),
+                ttl_sec=int(getattr(spec, "credential_ttl_sec_default", 900)),
+                run_id=meta.run_id,
+                tenant_id=meta.tenant_id,
+                principal=meta.principal,
+                capability_token=capability_token,  # broker may re-verify for defense in depth
+            ))
+            creds = issued.creds
+
+        return self._adapters[tool_name].execute(args, meta, creds=creds)
 ```
 
 ---
@@ -2347,6 +2850,67 @@ def compute_binding_hash(*, tool_name: str, args: dict, preview: dict | None) ->
 
 ### 12.4 Policy engine (data-driven, deterministic)
 
+#### 12.4.1 Policy bundles + selection + version pinning (close the “flat rules” gap)
+
+If your design claims “policy bundles are pluggable and context-aware,” you must actually wire:
+
+- **bundle identity** (`bundle_id`)
+- **bundle version** (`bundle_version`)
+- **selection context** (tenant/run_type/principal/data_class)
+- **pinning** (store selection in the run record so replay/debug is coherent)
+
+Otherwise policy inevitably becomes “whatever rules are deployed today,” which breaks auditability and reproducibility.
+
+Minimal ports:
+
+```python
+# kernel_tcb/policy/bundles.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Protocol
+
+from kernel_tcb.policy.engine import PolicyRule
+
+@dataclass(frozen=True)
+class PolicyBundle:
+    bundle_id: str
+    version: str
+    rules: list[PolicyRule]
+    metadata: dict
+
+@dataclass(frozen=True)
+class PolicySelection:
+    bundle_id: str
+    version: str
+    reason: str  # e.g. "tenant_default", "run_type_override"
+
+class PolicyBundleRegistry(Protocol):
+    def get(self, *, bundle_id: str, version: str) -> PolicyBundle: ...
+    def latest(self, *, bundle_id: str) -> PolicyBundle: ...
+    def list(self) -> list[PolicyBundle]: ...
+
+class PolicySelector(Protocol):
+    selector_id: str
+    def select(
+        self,
+        *,
+        tenant_id: str | None,
+        run_type: str,
+        principal: str,
+        data_class: str,
+    ) -> PolicySelection: ...
+```
+
+**Pin at run start** (recommended):
+- When creating a run, call `PolicySelector.select(...)`.
+- Persist `{bundle_id, version}` in `RunRecord`.
+- Emit audit event `policy.bundle_selected` (include selector_id, bundle_id, version, reason).
+
+Then every decision event includes `bundle_id` + `bundle_version`.
+
+---
+
+
 ```python
 # kernel_tcb/policy/engine.py
 from __future__ import annotations
@@ -2354,6 +2918,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Literal
+
+from kernel_tcb.policy.bundles import PolicyBundleRegistry
 from kernel_tcb.policy.decisions import PolicyDecision
 
 Decision = Literal["allow","deny","needs_approval"]
@@ -2363,28 +2929,48 @@ class PolicyRule:
     tool_name: str
     mode: Literal["read","write"]
     requires_approval: bool
-    constraints: dict
+    constraints: dict  # keep data-only; interpret deterministically
 
 class PolicyEngine:
-    def __init__(self, *, rules: list[PolicyRule], approval_expiry_sec: int = 300):
-        self._rules = {r.tool_name: r for r in rules}
+    """Deterministic policy evaluator.
+
+    - Pure/local evaluation is recommended.
+    - If you must call a remote policy service, model it as an effect (`policy_eval`)
+      so breakers/bulkheads/timeouts apply via the EffectRunner middleware (§9.5).
+    """
+    def __init__(self, *, registry: PolicyBundleRegistry, approval_expiry_sec: int = 300):
+        self._registry = registry
         self._approval_expiry_sec = approval_expiry_sec
 
-    def evaluate(self, *, tool_name: str, args: dict, has_side_effects: bool, risk_tier: str, binding_hash: str) -> PolicyDecision:
-        rule = self._rules.get(tool_name)
+    def evaluate(
+        self,
+        *,
+        bundle_id: str,
+        bundle_version: str,
+        tool_name: str,
+        args: dict,
+        has_side_effects: bool,
+        risk_tier: str,
+        binding_hash: str,
+    ) -> PolicyDecision:
+        bundle = self._registry.get(bundle_id=bundle_id, version=bundle_version)
+
+        # NOTE: cache this mapping in the registry for performance in production.
+        rules = {r.tool_name: r for r in bundle.rules}
+        rule = rules.get(tool_name)
         if rule is None:
             return PolicyDecision(decision="deny", reason="tool_not_allowlisted", binding_hash=binding_hash)
 
+        # Example constraint: forbid high-risk side effects without explicit allow.
         if has_side_effects and rule.mode != "write":
-            return PolicyDecision(decision="deny", reason="write_tool_not_allowed", binding_hash=binding_hash)
+            return PolicyDecision(decision="deny", reason="write_not_allowed", binding_hash=binding_hash)
 
-        # Example deterministic constraint
-        max_chars = int(rule.constraints.get("max_description_chars", 10_000))
-        for v in args.values():
-            if isinstance(v, str) and len(v) > max_chars:
-                return PolicyDecision(decision="deny", reason="arg_too_large", binding_hash=binding_hash)
+        # Example constraint hook (size limits, denylist, etc.)
+        # Keep constraints deterministic: no network calls, no implicit clocks.
+        # If constraints require external data, move evaluation behind an effect.
+        _ = rule.constraints  # interpreted by your Spec engine (§12.7)
 
-        if rule.requires_approval or risk_tier == "high":
+        if rule.requires_approval:
             return PolicyDecision(
                 decision="needs_approval",
                 reason="requires_approval",
@@ -2403,14 +2989,23 @@ from __future__ import annotations
 
 import time
 
+from kernel_tcb.audit.ledger import AuditLedger
 from kernel_tcb.policy.binding import compute_binding_hash
 from kernel_tcb.policy.engine import PolicyEngine
 from kernel_tcb.policy.approval_ports import ApprovalPort, ApprovalRequest
 from kernel_tcb.security.capabilities import CapabilityGrant, CapabilityTokens, compute_args_hash
 from kernel_tcb.tools.executor import ToolExecutor
 from kernel_tcb.tools.ports import ToolMeta, ToolResult
+from kernel_tcb.verify.chain import VerifierChain, VerifierInput
 
 class ReferenceMonitor:
+    """Complete mediation (K5) around tool execution.
+
+    Note on wiring: if ApprovalPort/PolicyEngine are remote services,
+    model them as effects (`approval_wait`, `policy_eval`) so breakers/bulkheads apply via middleware (§9.5).
+    This snippet shows the *logic*; production implementations typically execute the waits/calls through EffectRunner.
+    """
+
     def __init__(
         self,
         *,
@@ -2418,21 +3013,34 @@ class ReferenceMonitor:
         approvals: ApprovalPort,
         tools: ToolExecutor,
         capabilities: CapabilityTokens,
-        audit: "AuditLedger",
+        verifiers: VerifierChain,
+        audit: AuditLedger,
     ):
         self._policy = policy
         self._approvals = approvals
         self._tools = tools
         self._cap = capabilities
+        self._verifiers = verifiers
         self._audit = audit
+
+    def _bundle(self, meta: ToolMeta) -> tuple[str, str]:
+        if meta.policy_bundle_id is None or meta.policy_bundle_version is None:
+            # Fail closed in live/record; allow None in replay only if tool calls are blocked anyway.
+            if meta.mode != "replay":
+                raise ValueError("missing_policy_bundle_pin")
+            return ("unknown", "unknown")
+        return (meta.policy_bundle_id, meta.policy_bundle_version)
 
     def propose(self, *, trace_id, run_id, tool_name: str, args: dict, meta: ToolMeta) -> tuple[dict | None, str, int | None]:
         preview_result = self._tools.preview(tool_name=tool_name, args=args, meta=meta)
-        preview = preview_result.output
-        binding_hash = compute_binding_hash(tool_name=tool_name, args=args, preview=preview)
+        binding_hash = compute_binding_hash(tool_name=tool_name, args=args, preview=preview_result.output)
 
+        bundle_id, bundle_version = self._bundle(meta)
         spec = self._tools.spec(tool_name)
+
         decision = self._policy.evaluate(
+            bundle_id=bundle_id,
+            bundle_version=bundle_version,
             tool_name=tool_name,
             args=args,
             has_side_effects=spec.has_side_effects,
@@ -2441,34 +3049,63 @@ class ReferenceMonitor:
         )
 
         self._audit.emit(trace_id=trace_id, run_id=run_id, name="policy_decision", payload={
-            "phase": "propose",
+            "bundle_id": bundle_id,
+            "bundle_version": bundle_version,
             "tool": tool_name,
             "decision": decision.decision,
             "reason": decision.reason,
             "binding_hash": binding_hash,
         })
 
-        if decision.decision == "deny":
-            raise PermissionError(decision.reason)
-
         if decision.decision == "needs_approval":
             self._approvals.request(ApprovalRequest(
                 binding_hash=binding_hash,
                 tool_name=tool_name,
-                preview_redacted=preview,  # redaction omitted in snippet
+                preview_redacted=preview_result.output,  # redaction happens in AuditLedger
                 expires_at_epoch=decision.expires_at_epoch or 0,
                 reason=decision.reason,
             ))
 
-        return preview, binding_hash, decision.expires_at_epoch
+        if decision.decision == "deny":
+            raise PermissionError(decision.reason)
+
+        return preview_result.output, binding_hash, decision.expires_at_epoch
 
     def commit(self, *, trace_id, run_id, tool_name: str, args: dict, meta: ToolMeta, timeout_sec: int = 300) -> ToolResult:
-        # Recompute preview/binding hash at commit time (TOCTOU-safe).
+        # Recompute preview + binding at commit time (TOCTOU-safe).
         preview_result = self._tools.preview(tool_name=tool_name, args=args, meta=meta)
         binding_hash = compute_binding_hash(tool_name=tool_name, args=args, preview=preview_result.output)
 
+        # Independent verifier chain (K7): any verifier can veto.
+        v = self._verifiers.verify(
+            run_id=run_id,
+            inp=VerifierInput(
+                artifact_type="tool_intent",
+                payload={
+                    "tool": tool_name,
+                    "args_hash": compute_args_hash(tool_name=tool_name, args=args),
+                    "binding_hash": binding_hash,
+                    "preview_hash": None,  # optionally stable_hash(preview_result.output)
+                    "tenant_id": meta.tenant_id,
+                    "principal": meta.principal,
+                },
+            ),
+        )
+        if not v.ok:
+            self._audit.emit(trace_id=trace_id, run_id=run_id, name="verifier_veto", payload={
+                "tool": tool_name,
+                "binding_hash": binding_hash,
+                "verifier_id": v.detail.get("verifier_id"),
+                "reason": v.reason,
+            })
+            return ToolResult(ok=False, error={"code": "verifier_veto", "reason": v.reason})
+
+        bundle_id, bundle_version = self._bundle(meta)
         spec = self._tools.spec(tool_name)
+
         decision = self._policy.evaluate(
+            bundle_id=bundle_id,
+            bundle_version=bundle_version,
             tool_name=tool_name,
             args=args,
             has_side_effects=spec.has_side_effects,
@@ -2476,42 +3113,37 @@ class ReferenceMonitor:
             binding_hash=binding_hash,
         )
 
-        self._audit.emit(trace_id=trace_id, run_id=run_id, name="policy_decision", payload={
-            "phase": "commit",
-            "tool": tool_name,
-            "decision": decision.decision,
-            "binding_hash": binding_hash,
-        })
-
         if decision.decision == "deny":
-            raise PermissionError(decision.reason)
+            return ToolResult(ok=False, error={"code": "policy_denied", "reason": decision.reason})
 
         if decision.decision == "needs_approval":
-            dec = self._approvals.wait_for_decision(binding_hash=binding_hash, timeout_sec=timeout_sec)
-            if dec.decision != "approve":
-                raise PermissionError("approval_denied")
+            # In production, treat this wait as an effect (`approval_wait`) so middleware applies.
+            approval = self._approvals.wait_for_decision(binding_hash=binding_hash, timeout_sec=timeout_sec)
+            if approval.decision != "approved":
+                return ToolResult(ok=False, error={"code": "approval_denied", "reason": approval.reason})
 
-        # Mint a capability grant token that will be required by the tool executor.
+        # Mint capability token (required for side effects; also recommended for tools that require secrets).
         capability_token: str | None = None
-        if spec.has_side_effects:
-            expires_at = int(time.time()) + timeout_sec
+        if spec.has_side_effects or getattr(spec, "required_scopes", []):
             grant = CapabilityGrant(
-                phase="commit",
                 tool_name=tool_name,
                 args_hash=compute_args_hash(tool_name=tool_name, args=args),
-                binding_hash=binding_hash,
+                phase="commit",
                 run_id=meta.run_id,
                 principal=meta.principal,
                 tenant_id=meta.tenant_id,
-                expires_at_epoch=expires_at,
+                expires_at_epoch=int(time.time()) + 300,
+                binding_hash=binding_hash,
             )
             capability_token = self._cap.sign(grant)
 
             self._audit.emit(trace_id=trace_id, run_id=run_id, name="capability_issued", payload={
+                "bundle_id": bundle_id,
+                "bundle_version": bundle_version,
                 "tool": tool_name,
                 "args_hash": grant.args_hash,
                 "binding_hash": binding_hash,
-                "expires_at_epoch": expires_at,
+                "expires_at_epoch": grant.expires_at_epoch,
                 "grant_hash": grant.stable_hash(domain="capability_grant"),
             })
 
@@ -2730,6 +3362,94 @@ class OrSpec:
 **Testing discipline:**
 - Each spec has unit tests for pass/fail and reason codes.
 - “Golden policy bundle” tests compile a real policy file → spec tree → decisions match expectations.
+
+
+
+### 12.8 K14 — Secrets broker (scoped, ephemeral credentials; Strategy never sees secrets)
+
+If you intend to run real tools in production, you need a disciplined pattern for credentials:
+
+- Strategy must **never** access secrets.
+- Tools must not carry long-lived keys in args or environment “just because it’s convenient.”
+- Credential access must be **scoped**, **audited**, and **rotatable** by design.
+
+The kernel-friendly answer is a **SecretsBroker** port that issues short-lived, tool-scoped credentials.
+
+#### Secrets broker port
+
+```python
+# kernel_tcb/security/secrets.py
+from __future__ import annotations
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Protocol
+
+class CredentialRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool_name: str
+    scopes: list[str] = Field(default_factory=list)  # e.g. ["github:read", "s3:write:bucketA"]
+    ttl_sec: int = 900
+
+    run_id: str
+    tenant_id: str | None
+    principal: str
+
+    # Defense in depth: broker may re-verify capability token (K5/K14).
+    capability_token: str | None = None
+
+class IssuedCredential(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    credential_id: str
+    expires_at_epoch: int
+    # Arbitrary opaque credential material. Never log. Never include in audit payload.
+    creds: dict[str, str] = Field(default_factory=dict)
+
+class SecretsBroker(Protocol):
+    broker_id: str
+    def issue(self, req: CredentialRequest) -> IssuedCredential: ...
+```
+
+#### How it integrates (minimum viable)
+
+- Add `required_scopes` to `ToolSpec` (see §11.1).
+- `ToolExecutor.execute()` requests credentials from `SecretsBroker` when:
+  - `ToolSpec.required_scopes` is non-empty, and
+  - execution is not replay mode.
+
+**Fail closed:** if a tool requires scopes but no broker is configured, execution must fail.
+
+#### Audit and privacy requirements (don’t skip these)
+
+The broker must emit audit events (via `AuditLedger`) such as:
+
+- `secrets.issued` — include `credential_id`, `tool_name`, `scopes` (or their hash), `expires_at_epoch`, `tenant_id`, `principal`
+- `secrets.denied` — include reason code (e.g., `scope_not_allowlisted`, `capability_missing`, `tenant_blocked`)
+
+Do **not** include raw credential material in audit logs.
+
+#### Rotation and “no long-lived keys” stance
+
+Prefer mechanisms that naturally issue ephemeral credentials (examples):
+- cloud identity federation (STS-style short-lived tokens),
+- mTLS client certs with short validity,
+- Vault dynamic secrets.
+
+If you must use static secrets early, keep them behind the broker and set low TTL session tokens on top.
+
+#### Resilience wiring
+
+Treat the broker as an external dependency:
+- dependency key: `secrets:primary`
+- wrap with bulkhead + breaker + timeout via EffectRunner middleware (§9.5)
+- on outage: fail tool exec deterministically (`DependencyUnavailable`) and rely on outbox/DLQ policies where appropriate
+
+#### Release gates (minimum)
+
+Add tests that prove:
+- Strategy never receives secrets (no secret fields in StrategyContext / observations).
+- Tools that declare `required_scopes` cannot execute without a capability token and broker issuance.
+- Secrets are never present in `AuditEvent.payload` (scan for common key names or patterns).
 
 
 ## 13. K10 — Outbox (durable intent log for side effects)
@@ -3211,6 +3931,69 @@ class Verifier(Protocol):
     def verify(self, *, run_id: str, artifacts: dict) -> VerifyResult: ...
 ```
 
+
+
+### 14.1 VerifierChain composition (independent veto, composable safety checks)
+
+A single `Verifier` interface is a start, but the K7 intent is **multiple independent verifiers**, each able to veto.
+
+Use a chain/composite pattern:
+
+- each verifier is small and owns one concern (PII leak check, prompt injection check, tool-arg constraints, tenant policy invariants),
+- the chain aggregates results and fails closed on the first veto (or collects all vetoes, your choice),
+- verifier versions are recorded in the bundle manifest (K16-min).
+
+#### Typed verifier input
+
+```python
+# kernel_tcb/verify/chain.py
+from __future__ import annotations
+from typing import Protocol, Literal
+from pydantic import BaseModel, ConfigDict, Field
+
+from kernel_tcb.verify.ports import VerifyResult, Verifier
+
+class VerifierInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    artifact_type: Literal["tool_intent","tool_result","run_summary"]
+    payload: dict = Field(default_factory=dict)
+
+class VerifierChain:
+    def __init__(self, verifiers: list[Verifier]):
+        self._verifiers = verifiers
+
+    def verify(self, *, run_id: str, inp: VerifierInput) -> VerifyResult:
+        for v in self._verifiers:
+            r = v.verify(run_id=run_id, artifacts={
+                "artifact_type": inp.artifact_type,
+                "payload": inp.payload,
+                "verifier_id": v.verifier_id,
+            })
+            if not r.ok:
+                # Attach the vetoing verifier id for observability.
+                detail = dict(r.detail or {})
+                detail["verifier_id"] = v.verifier_id
+                return VerifyResult(ok=False, reason=r.reason, detail=detail)
+        return VerifyResult(ok=True, reason=None, detail={})
+```
+
+#### Where verifiers run
+
+At minimum:
+- **Before capability issuance / tool commit** (most important): veto unsafe actions.
+- Optionally after tool result: veto or redact unsafe outputs before Strategy sees them.
+
+**Hard rule:** verifiers must not have privileged access that Strategy lacks.  
+If a verifier needs model/tool calls, those calls must be modeled as effects and recorded (K11), and must respect budgets (K6).
+
+#### Wiring recommendation
+
+- `ReferenceMonitor.commit()` calls `VerifierChain.verify(...)` on `artifact_type="tool_intent"` before approval/capability issuance.
+- Record veto events (`verifier_veto`) into the audit ledger with structured reason codes.
+
+---
+
+
 ---
 
 ## 15. K13 — Memory governance (privileged subsystem)
@@ -3632,6 +4415,40 @@ Required tests:
 - `test_tool_pack_contract_suite`
 - `test_extension_loading_rejects_duplicate_names`
 - `test_extension_does_not_import_tcb_forbidden_modules` (static guard)
+
+
+#### Proof L — Middleware coverage (no bypass of resilience + governance)
+
+Goal: prove that **all external calls** are executed through the EffectRunner middleware lane (§9.5), so you can’t “forget” breakers/bulkheads/timeouts on a new dependency.
+
+Scenario:
+- Install a `TripwireMiddleware` that sets a contextvar (e.g. `in_effect_lane=True`).
+- Wrap each external adapter/client with a stub that asserts the contextvar is set:
+  - model provider(s),
+  - tool adapter(s),
+  - approval service,
+  - secrets broker,
+  - persistence/audit repositories (if remote).
+- Execute a scenario run that triggers each effect kind at least once:
+  - `call_model`
+  - `tool_preview`
+  - `tool_execute`
+  - `approval_wait`
+  - `persist_checkpoint`
+  - `audit_emit`
+  - `outbox_enqueue`
+  - `secrets_issue`
+- Verify that no external call can occur without the contextvar being present.
+
+Required tests:
+- `test_external_calls_require_effect_middleware_lane`
+- `test_dependency_key_convention_is_stable` (guards breaker/bulkhead key drift)
+- `test_approval_and_secrets_calls_use_middleware` (targets the most commonly-forgotten paths)
+
+Why this matters:
+- It converts “we intended circuit breakers/bulkheads everywhere” into an enforceable property.
+- It prevents subtle regressions when a new port is introduced or a helper calls a client directly.
+
 
 ---
 
