@@ -4,6 +4,8 @@
 **Companion to:** `implementation_playbook.md`  
 **Last updated:** 2026-01-08
 
+> All section references (§) link to `implementation_playbook.md` unless otherwise noted.
+
 ---
 
 ## Overview
@@ -48,7 +50,7 @@ Patterns for composing objects into larger structures.
 | **Adapter** | Convert interface to expected form | [§1.2](implementation_playbook.md#12-reference-architecture-ports--adapters-hexagonal) — Tool adapters, model provider adapters |
 | **Facade** | Simplified interface to subsystem | [§5.1](implementation_playbook.md#51-kernelruntime-interface) — `KernelRuntime` as public facade |
 | **Proxy** | Control access to an object | [§12.5](implementation_playbook.md#125-reference-monitor-complete-mediation) — Reference monitor proxies tool execution |
-| **Decorator** | Add behavior dynamically | [§5.3D](implementation_playbook_resilience_extensibility.md#d-effectrunner-middleware-for-cross-cutting-concerns) — Effect middleware |
+| **Decorator** | Add behavior dynamically | [§5.3](implementation_playbook.md#53-extension-points-tools-verifiers-policies-middleware--without-breaking-the-boundary) — Effect middleware |
 | **Composite** | Tree structures | [§7.4](implementation_playbook.md#74-recommended-contextplan--contextcompiler-typed-prompt-program) — `ContextPlan` with nested items |
 
 ### 1.3 Creational Patterns
@@ -57,7 +59,7 @@ Patterns for object creation (less prominent in this architecture).
 
 | Pattern | Purpose | Implementation Reference |
 |---------|---------|-------------------------|
-| **Factory Method** | Delegate instantiation | [§5.3A](implementation_playbook_resilience_extensibility.md#a-tool-packs-new-tools-without-kernel-edits) — `ToolRegistration.adapter_factory` |
+| **Factory Method** | Delegate instantiation | [§5.3](implementation_playbook.md#53-extension-points-tools-verifiers-policies-middleware--without-breaking-the-boundary) — `ToolRegistration.adapter_factory` |
 | **Builder** | Construct complex objects step-by-step | [§7.4](implementation_playbook.md#74-recommended-contextplan--contextcompiler-typed-prompt-program) — `compile_context()` builds `ContextPlan` |
 
 ---
@@ -99,7 +101,8 @@ From Fowler's *Patterns of Enterprise Application Architecture* (2002) and Hohpe
 | Pattern | Purpose | Implementation Reference |
 |---------|---------|-------------------------|
 | **Transactional Outbox** | Reliable message publishing | [§13](implementation_playbook.md#13-k10--outbox-durable-intent-log-for-side-effects) — `Outbox` with `pending → committed` lifecycle |
-| **Saga** | Distributed transaction with compensations | [§13.1](implementation_playbook_resilience_extensibility.md#131-saga-pattern-multi-step-commits-with-compensations) — `SagaState` + compensation flow |
+| **Saga** | Distributed transaction with compensations | [§13.2](implementation_playbook.md#132-saga-pattern-multi-step-commits-with-compensations) — `SagaState` + compensation flow |
+| **Dead Letter Channel** | Quarantine failed messages | [§13.1](implementation_playbook.md#131-dead-letter-queue-dlq--retrybackoff-discipline) — `OutboxRecord` with retry tracking + DLQ |
 | **Correlation Identifier** | Track related messages | Throughout — `trace_id`, `run_id`, `effect_id` |
 
 ---
@@ -110,14 +113,16 @@ From Nygard's *Release It!* (2007, 2nd ed. 2018). These prevent cascading failur
 
 | Pattern | Purpose | Implementation Reference |
 |---------|---------|-------------------------|
-| **Circuit Breaker** | Stop calling failing dependencies | [§9.4](implementation_playbook_resilience_extensibility.md#circuit-breaker-reference-implementation) — `CircuitBreaker` with open/half-open/closed states |
-| **Bulkhead** | Isolate failure domains | [§9.4](implementation_playbook_resilience_extensibility.md#bulkhead-capacity-limiter--bounded-queue) — `Bulkhead` with semaphore + fail-fast |
+| **Circuit Breaker** | Stop calling failing dependencies | [§9.4](implementation_playbook.md#94-operational-resilience-in-the-effectrunner-timeouts--retries--breakers--bulkheads) — `CircuitBreaker` with open/half-open/closed states |
+| **Bulkhead** | Isolate failure domains | [§9.4](implementation_playbook.md#94-operational-resilience-in-the-effectrunner-timeouts--retries--breakers--bulkheads) — `Bulkhead` with semaphore + fail-fast |
 | **Timeout** | Bound wait time | [§11.1](implementation_playbook.md#111-tool-manifest) — `timeout_ms_default` per tool |
 | **Retry** | Recover from transient failures | [§3.4](implementation_playbook.md#34-production-hardening-checklist-the-boring-but-saves-you-section) — Bounded retries with jitter |
-| **Fail Fast** | Reject early under overload | [§9.4](implementation_playbook_resilience_extensibility.md#bulkhead-capacity-limiter--bounded-queue) — `BulkheadBusy` exception |
+| **Fail Fast** | Reject early under overload | [§9.4](implementation_playbook.md#94-operational-resilience-in-the-effectrunner-timeouts--retries--breakers--bulkheads) — `BulkheadBusy` exception |
 | **Steady State** | Prevent resource exhaustion | [§9.2](implementation_playbook.md#92-budgets-hard-stop) — Budget enforcement |
 | **Test Harness** | Fault injection for testing | [§21.3](implementation_playbook.md#213-fault-injection-chaos-but-targeted) — Targeted chaos tests |
-| **Shed Load** | Drop work under pressure | [§3.4](implementation_playbook_resilience_extensibility.md#resilience-defaults-required) — Backpressure + overload errors |
+| **Shed Load** | Drop work under pressure | [§3.4](implementation_playbook.md#34-production-hardening-checklist-the-boring-but-saves-you-section) — Backpressure + overload errors |
+| **Dead Letter Queue** | Quarantine failed messages | [§13.1](implementation_playbook.md#131-dead-letter-queue-dlq--retrybackoff-discipline) — `OutboxRecord` with `dead_lettered_at` + retry tracking |
+| **Resilience Façade** | Unified resilience coordination | [§9.4](implementation_playbook.md#94-operational-resilience-in-the-effectrunner-timeouts--retries--breakers--bulkheads) — `ResilienceManager` wrapping breakers + bulkheads |
 
 ### Resilience Pattern Interactions
 
@@ -157,12 +162,12 @@ Patterns for growing system capabilities without widening the trusted computing 
 | Pattern | Purpose | Implementation Reference |
 |---------|---------|-------------------------|
 | **Ports & Adapters (Hexagonal)** | Swap implementations freely | [§1.2](implementation_playbook.md#12-reference-architecture-ports--adapters-hexagonal) — Core architecture |
-| **Plugin Registry** | Discover and load extensions | [§5.3A](implementation_playbook_resilience_extensibility.md#a-tool-packs-new-tools-without-kernel-edits) — `ToolRegistry` |
-| **Middleware Pipeline** | Compose cross-cutting concerns | [§5.3D](implementation_playbook_resilience_extensibility.md#d-effectrunner-middleware-for-cross-cutting-concerns) — `EffectMiddleware` protocol |
-| **Anti-Corruption Layer** | Translate external APIs | [§1.9](implementation_playbook_resilience_extensibility.md#19-extensibility-patterns-grow-capabilities-without-widening-the-tcb) — Adapters for older plugin versions |
-| **Strangler Fig** | Incremental migration | [§1.9](implementation_playbook_resilience_extensibility.md#19-extensibility-patterns-grow-capabilities-without-widening-the-tcb) — Route subset to new implementation |
-| **Feature Toggle** | Runtime capability switching | [§1.9](implementation_playbook_resilience_extensibility.md#19-extensibility-patterns-grow-capabilities-without-widening-the-tcb) — Feature flags for rollouts |
-| **Contract Testing** | Verify extension compatibility | [§5.3E](implementation_playbook_resilience_extensibility.md#e-safe-evolution-rules) + [§21.2H](implementation_playbook_resilience_extensibility.md#proof-h--extension-contract-tests-plugins-dont-widen-the-trust-boundary) — Extension contract tests |
+| **Plugin Registry** | Discover and load extensions | [§5.3](implementation_playbook.md#53-extension-points-tools-verifiers-policies-middleware--without-breaking-the-boundary) — `ToolRegistry` |
+| **Middleware Pipeline** | Compose cross-cutting concerns | [§5.3](implementation_playbook.md#53-extension-points-tools-verifiers-policies-middleware--without-breaking-the-boundary) — `EffectMiddleware` protocol |
+| **Anti-Corruption Layer** | Translate external APIs | [§1.9](implementation_playbook.md#19-extensibility-patterns-grow-capabilities-without-widening-the-tcb) — Adapters for older plugin versions |
+| **Strangler Fig** | Incremental migration | [§1.9](implementation_playbook.md#19-extensibility-patterns-grow-capabilities-without-widening-the-tcb) — Route subset to new implementation |
+| **Feature Toggle** | Runtime capability switching | [§1.9](implementation_playbook.md#19-extensibility-patterns-grow-capabilities-without-widening-the-tcb) — Feature flags for rollouts |
+| **Contract Testing** | Verify extension compatibility | [§5.3](implementation_playbook.md#53-extension-points-tools-verifiers-policies-middleware--without-breaking-the-boundary) + [§21](implementation_playbook.md#21-proof-suite-and-release-gates-turn-kernel-claims-into-tests) — Extension contract tests |
 
 ### Extension Point Architecture
 
@@ -249,11 +254,11 @@ Summary of pattern coverage by kernel subsystem:
 | **K6 Budgets** | Steady State, Circuit Breaker, Bulkhead | ✓ Complete |
 | **K7 Verifiers** | Chain of Responsibility | ✓ Complete |
 | **K9 Audit** | Observer, Event Sourcing | ✓ Complete |
-| **K10 Outbox** | Transactional Outbox, Saga, Idempotent Receiver | ✓ Complete |
+| **K10 Outbox** | Transactional Outbox, Saga, Idempotent Receiver, Dead Letter Queue | ✓ Complete |
 | **K11 Replay** | Event Sourcing, Snapshot | ✓ Complete |
 | **K18 Sanitization** | Taint Tracking | ✓ Complete |
 | **Extensions** | Plugin Registry, Middleware, Contract Testing | ✓ Complete |
-| **Resilience** | Circuit Breaker, Bulkhead, Timeout, Retry | ✓ Complete |
+| **Resilience** | Circuit Breaker, Bulkhead, Timeout, Retry, Dead Letter Queue | ✓ Complete |
 
 ---
 
@@ -263,7 +268,7 @@ Summary of pattern coverage by kernel subsystem:
 |------|------|-------|-------------------|
 | *Design Patterns* (Gamma et al.) | 1994 | GoF patterns | State, Command, Strategy, Adapter, Observer |
 | *Patterns of Enterprise Application Architecture* (Fowler) | 2002 | Enterprise patterns | Repository, Unit of Work, Event Sourcing |
-| *Enterprise Integration Patterns* (Hohpe, Woolf) | 2003 | Messaging patterns | Saga, Correlation ID, Transactional Outbox |
+| *Enterprise Integration Patterns* (Hohpe, Woolf) | 2003 | Messaging patterns | Saga, Correlation ID, Transactional Outbox, Dead Letter Channel |
 | *Release It!* (Nygard) | 2007/2018 | Stability patterns | Circuit Breaker, Bulkhead, Timeout, Fail Fast |
 | *Building Microservices* (Newman) | 2015/2021 | Service patterns | Strangler Fig, Anti-Corruption Layer |
 | *Designing Data-Intensive Applications* (Kleppmann) | 2017 | Data patterns | Event Sourcing, Idempotency, Exactly-Once |
@@ -279,9 +284,9 @@ These patterns are recommended for future iterations:
 |---------|--------|---------|----------|
 | **Specification** | Evans (DDD) | Composable policy predicates | Medium |
 | **Repository** | Fowler | Abstract persistence | Medium |
-| **Dead Letter Channel** | Hohpe | Quarantine failed messages | High |
 | **Competing Consumers** | Hohpe | Parallel processing | Low (single-node) |
 | **Leader Election** | Distributed systems | Multi-node coordination | Future |
+| **Service Mesh** | Cloud Native | Cross-service observability | Future |
 
 ---
 
