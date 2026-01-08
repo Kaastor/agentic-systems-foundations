@@ -226,6 +226,53 @@ A strategy process should run with a **restricted profile** by default:
 
 This is distinct from K8 “execute untrusted code”; here you’re isolating *your own* strategy code because humans are fallible and deadlines are undefeated.
 
+#### 1.3.1 Strategy RPC contract hardening (so “in-proc now” doesn’t rot)
+
+When teams start in-process, they often skip all the “service hygiene” and then discover later that their boundary is a suggestion.
+
+Make these constraints part of the **ABI** from day one:
+
+- **Versioning:** include `abi_version` in request/response (semver). Kernel rejects unknown/unsupported versions.
+- **Deadlines:** request carries `deadline_ms` (or absolute `deadline_epoch_ms`). Strategy must treat it as authoritative.
+- **Payload caps:** enforce max bytes for observations and proposals; return a typed `payload_too_large` error.
+- **Cancellation:** kernel can cancel a proposal in flight; strategy should abort work quickly (best effort).
+- **Determinism hooks:** pass `rng_seed` and `now_epoch_ms` to strategy for replayable behavior.
+- **Tracing:** propagate `traceparent` + `tracestate` through the RPC boundary.
+
+Minimal ABI additions (illustrative):
+
+```python
+class StrategyContext(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    abi_version: str  # e.g. "1.0.0"
+    traceparent: str | None = None
+
+    rng_seed: int
+    now_epoch_ms: int
+    deadline_epoch_ms: int
+
+    # existing fields...
+    trace_id: UUID
+    run_id: UUID
+    sanitized_observations: list[SanitizedContent]
+    budgets: Budgets
+```
+
+#### 1.3.2 StrategyHost “least privilege” enforcement (Linux notes)
+
+If you can, make your isolation enforceable by the OS:
+
+- **Drop privileges:** run as a non-root user; `no_new_privs` on Linux.
+- **Resource limits:** cgroups for CPU/memory; rlimits for file descriptors, process count, core dumps.
+- **Filesystem:** read-only root; small writable temp dir; mount namespaces if containerized.
+- **Network:** default deny egress (network namespace with no routes; or firewall rules).
+- **Syscalls:** seccomp profile (deny dangerous syscalls; allow only what strategy needs).
+- **Crash-only contract:** strategy can die; kernel converts it into a typed error and fails closed.
+
+The elegance goal is: even if someone “accidentally” adds an import or tries something clever, the OS shrugs and says “no.”
+
+
 #### Migration path: in-proc today, service later
 
 Keep the kernel interface stable by using a port adapter.
@@ -399,6 +446,54 @@ class EffectRunner:
 
 **Structural win:** you can now enforce ordering constraints mechanically, e.g. “no `ToolExecute` effect can be emitted unless a `policy_decision` event exists for the same args hash.”
 
+
+
+#### 1.4.1 Make the effects boundary *unbreakable* (lint + runtime guards)
+
+The reducer/effects split only pays off if you prevent “one little shortcut” from creeping in.
+
+**Enforce it in three layers:**
+
+1) **Import-linter contract (static)**
+   - `kernel_tcb/core/**` may import:
+     - `kernel_tcb/abi/**`
+     - `kernel_tcb/effects/abi.py`
+     - pure utilities (`stable_hash`, schemas)
+   - `kernel_tcb/core/**` must **not** import:
+     - tool adapters
+     - model providers/SDKs
+     - persistence implementations
+     - policy bundles
+
+   Example `contracts/importlinter.ini` rule (illustrative):
+
+```ini
+[importlinter]
+root_package = kernel_tcb
+
+[importlinter:contract:core_is_pure]
+name = Core cannot import side-effect modules
+type = forbidden
+source_modules =
+    kernel_tcb.core
+forbidden_modules =
+    kernel_tcb.tool_adapters
+    kernel_tcb.providers
+    kernel_tcb.persistence
+```
+
+2) **API design guard (type-level)**
+   - Make the “impure” functions require an `EffectContext` that is only constructible inside `EffectRunner`.
+   - Keep constructors internal (module-private) and expose only validated factories.
+
+3) **Runtime guard (fail closed)**
+   - `ToolExecutor` should reject calls missing:
+     - `effect_id`
+     - `capability_token` (for side-effecting tools)
+     - `policy_decision_id` / `binding_hash` where applicable
+   - This makes unauthorized paths obvious in logs and impossible to “accidentally” wire up.
+
+**Why this matters:** it’s how you stop architecture drift. Your future self will thank you.
 ### 1.5 Upgrade: event-sourced run state (optional, very elegant)
 
 You already have the ingredients: audit ledger (K9), persistence/outbox (K10), replay hooks (K11). The coherence upgrade is to make a single statement true:
@@ -517,6 +612,101 @@ warn_unused_ignores = true
 addopts = "-q"
 testpaths = ["packages/kernel_tcb/tests"]
 ```
+
+
+### 3.3 Architectural decisions to lock *before* you write “real code”
+
+These are the places teams most often “stay vague” early…and then pay for it later by refactoring the kernel under load.
+
+Lock these down early and treat them as **API-level commitments**.
+
+#### 3.3.1 Strategy execution topology (even if you start in-proc)
+
+**Default recommendation:** design Strategy as **out-of-process** from day one, even if your first deployment runs it in-process.
+
+Decide (and document in `ops/`):
+- **Transport:** Unix domain socket + HTTP/JSON (default) or gRPC (preferred once stable).
+- **Timeouts:** `propose_timeout_ms` and a hard wall-clock deadline enforced by the kernel host.
+- **Payload limits:** max bytes for `observations` and `proposal` (fail closed on overflow).
+- **ABI versioning:** a required `abi_version` field in request/response (semver); kernel rejects mismatches.
+- **Cancellation:** kernel-issued cancellation token / deadline; strategy must treat it as authoritative.
+- **Determinism hooks (recommended):** kernel provides `rng_seed` and `now_epoch_ms` in the request so strategies can be deterministic under replay.
+
+Architectural hardening that solves half your future problems:
+- **No network by default** for strategy processes (deny egress; allowlist only if explicitly justified).
+- **No secrets in env** (empty env; no cloud credentials; no DB creds; no API keys).
+- **CPU/mem/time limits** independent of kernel budgets (cgroups/rlimits).
+
+#### 3.3.2 Effects-only I/O (the “single lane” rule)
+
+**Default recommendation:** *all* model calls + tool calls + persistence + approvals are **effects** produced by `KernelCore` and executed by `EffectRunner`.
+
+Decide (and enforce via tooling):
+- Which modules are “pure” (core) vs “impure” (runner/adapters).
+- The **exact effect types** you support (preview vs commit; policy eval; approval wait; tool exec; persist; emit audit).
+- Your policy on **parallelism**: simplest is “one effect at a time per run_id” (deterministic); scale later.
+
+Architectural hardening:
+- Add an **import boundary contract**: core cannot import tool adapters/providers.
+- Add a **runtime guard**: tool execution requires an `EffectContext` created only by the runner.
+
+#### 3.3.3 Capability token signing & key management
+
+**Default recommendation:** capability tokens are required for side-effecting tools; tokens are short-lived and tied to canonical args hash + phase + principal/tenant/run.
+
+Decide now:
+- **Crypto:** HMAC-SHA256 (internal systems) vs asymmetric (multi-service, zero-trust).
+- **Key storage:** KMS/HSM (preferred) vs environment-injected secret (acceptable early).
+- **Rotation:** key ring with `kid` (key id) embedded in tokens; verify old keys for a grace window.
+- **Clock skew:** allowed skew (e.g., ±30s) and how you handle monotonic time.
+
+Architectural hardening:
+- Make `ToolExecutor.execute(...)` **require** a verified token (fail closed).
+- Emit `capability_issued` + `capability_verified` events into audit.
+
+#### 3.3.4 Event log mode (state store vs event sourcing)
+
+Pick one early; it changes how you debug and how you resume.
+
+- **Option A (simpler):** persisted state + append-only audit (K9) + outbox (K10).
+- **Option B (elegant):** event-sourced run state (fold events → state) + snapshots (see §13.2).
+
+If you choose Option B, decide now:
+- **Storage backend:** Postgres (recommended), SQLite (dev), or log systems (Kafka) once you need scale.
+- **Event evolution rules:** append-only fields; explicit `schema_version`; never mutate old events.
+- **Retention + privacy:** whether events can contain any user text (ideally: only redacted/sanitized).
+
+---
+
+### 3.4 Production hardening checklist (the “boring but saves you” section)
+
+#### Observability (required)
+- **Structured logs** with `trace_id`, `run_id`, `effect_id`, `event_seq`, `tool_name`.
+- **Traces:** propagate W3C `traceparent` across strategy RPC, policy service, tool adapters.
+- **Metrics (minimum):**
+  - runs started/succeeded/failed
+  - policy allow/deny/needs_approval counts
+  - tool executions by tool_name + outcome
+  - outbox pending + retries + dead letters
+  - replay-mode “blocked external call” counter (should be zero in production runs, non-zero only in tests)
+
+#### Resilience defaults (required)
+- **Timeouts everywhere** (model/tool/policy/strategy RPC/persistence).
+- **Retry policy** with strict bounds + jitter; never retry non-idempotent operations without outbox gating.
+- **Backpressure:** cap concurrent runs per tenant; cap effect queue depth; fail fast with typed overload errors.
+- **Circuit breakers** for flaky integrations.
+
+#### Data governance (required)
+- Redaction happens **before** any write (audit/state/events).
+- Encryption at rest for persistence stores.
+- Retention policy for run logs/events + deletion workflow (per tenant/run_id).
+
+#### Release gating (required)
+- A must-pass “proof suite” (see §21) that demonstrates:
+  - deterministic replay,
+  - token-gated tool execution,
+  - idempotent resume (no duplicate side effects),
+  - prompt injection resilience (data never becomes instructions).
 
 ---
 
@@ -1871,6 +2061,47 @@ class CapabilityTokens:
 
 ---
 
+
+#### 12.6.1 Key management and rotation (don’t wing this later)
+
+Capability tokens become part of your authorization “ground truth,” so treat signing keys like production secrets.
+
+**Minimum viable key management:**
+- Tokens include a `kid` (key id).  
+- Verifier looks up keys in a **KeyRing**:
+  - one active signing key,
+  - N previous verification keys (for rotation grace period).
+- Keys are never logged; only `kid` is logged.
+
+**Rotation policy (reasonable default):**
+- Rotate signing key on a schedule (e.g., weekly/monthly) or on incident.
+- Keep old keys valid for verification for **2× the max token TTL** (plus clock skew).
+- Immediately revoke on compromise (remove from verifier set).
+
+**Where keys live:**
+- Preferred: KMS/HSM (managed key material, audit, rotation).
+- Acceptable early: env-injected secret (with strict access controls) + secret manager.
+- Avoid: keys baked into images, repos, or “temporary” config files.
+
+**Token claims you should include:**
+- `kid`, `iat`, `exp` (issued-at and expiry)
+- `tenant_id`, `run_id`, `principal_id`
+- `tool_name`, `args_hash`, `phase` (`preview`/`commit` or `read`/`write`)
+- optional: `approval_binding_hash`, `policy_decision_id`
+
+**Clock behavior:**
+- Allow small skew (±30s) to avoid false negatives.
+- Prefer monotonic time for local timeouts; use wall clock only for expiry semantics.
+
+#### 12.6.2 Operational hardening: “permit objects” across distributed executors
+
+If you move tool execution to separate workers:
+- Treat the capability token as the *only* permission artifact the executor trusts.
+- Do not re-query policy at execution time (prevents “split brain” policy state).
+- Require the executor to emit `capability_verified` and `tool_executed` events with the token’s stable grant hash.
+
+This is what makes complete mediation survive distributed systems.
+
 ## 13. K10 — Outbox (durable intent log for side effects)
 
 A stronger outbox stores **result/error** as well as status.
@@ -2092,6 +2323,60 @@ def apply_event(s: DerivedRunState, *, event_type: str, payload: dict[str, Any])
 
 Both are fine; choose based on operational comfort.
 
+
+#### Production storage patterns (pick one early)
+
+SQLite is a fine reference, but production systems should choose an event store that gives you:
+- atomic append,
+- predictable ordering,
+- concurrency control,
+- easy retention/backup.
+
+**Option 1 (recommended): Postgres per-run stream**
+- Table `run_events(run_id, seq, event_id, ts, event_type, payload_json, prev_hash, hash, schema_version, producer_version)`
+- Primary key `(run_id, seq)` ensures a total order per run.
+- Add `run_heads(run_id, next_seq)` to allocate seq safely.
+
+Allocation pattern (transactional, sketch):
+1) `SELECT next_seq FROM run_heads WHERE run_id=? FOR UPDATE`
+2) `UPDATE run_heads SET next_seq = next_seq + 1 ... RETURNING old_next_seq AS seq`
+3) `INSERT INTO run_events(run_id, seq, ...) VALUES (...)`
+4) optional: snapshot/outbox updates in the same transaction.
+
+**Option 2: Log system (Kafka) + snapshot store**
+- Great for scale, but more moving parts (exactly-once semantics are a lifestyle choice).
+- You’ll still want a transactional snapshot store keyed by `run_id`.
+
+**Option 3: Cloud KV (DynamoDB)**
+- Works well with `(PK=run_id, SK=seq)`; careful with hot partitions and conditional writes.
+
+#### Event evolution rules (non-negotiable if you want replay)
+
+- Every event carries `schema_version` (integer) and `producer_version` (semver).
+- Backwards compatible additions only:
+  - **add fields** with defaults,
+  - **add new event types**,
+  - never delete/rename fields in existing event types.
+- Reducers must ignore unknown fields and (optionally) unknown event types (forward-compat).
+
+#### Concurrency and ordering: make it impossible to “double step”
+
+Even if your runtime intends “one worker per run,” enforce correctness at persistence:
+
+- Enforce `(run_id, seq)` uniqueness.
+- Use a transactional seq allocator (don’t do `MAX(seq)+1` under concurrency).
+- Treat “unexpected seq” as a hard error (`concurrent_step_detected`).
+
+This prevents subtle bugs where two orchestrators race and both think they own the next step.
+
+#### Privacy and retention
+
+Event sourcing is incredibly debuggable…and therefore incredibly good at retaining things you didn’t mean to retain.
+
+- Keep raw user text out of events (store hashes or references to sanitized blobs).
+- Apply redaction rules **before** event append.
+- Document retention + deletion behavior per tenant/run_id.
+
 ---
 
 ## 14. K7 — Verifiers (independent veto)
@@ -2292,6 +2577,104 @@ Keep the Adoption Guide focused on:
 
 ---
 
+
+## 21. Proof suite and release gates (turn kernel claims into tests)
+
+This section exists because “we built it correctly” is not a property you can deploy.
+
+A production-grade agent kernel should have a small set of **must-pass proofs** that demonstrate the *kernel invariants are mechanically enforced*.
+
+### 21.1 The four must-pass end-to-end proofs
+
+#### Proof A — Deterministic replay (no external calls)
+
+Goal: prove that a recorded run can be replayed deterministically and produces the same derived state.
+
+- Run in **record mode** with real model/tool adapters (or deterministic fakes).
+- Persist:
+  - model requests/responses (hashed + redacted),
+  - tool previews/executions (hashed + redacted),
+  - run events / audit.
+- Replay in **replay mode**:
+  - EffectRunner must refuse any “live” adapter calls.
+  - State fold at end must match (state hash equality).
+  - Outbox must not enqueue new side effects.
+
+Required tests:
+- `test_replay_produces_same_state_hash`
+- `test_replay_blocks_external_calls`
+
+#### Proof B — Token-gated execution (complete mediation)
+
+Goal: prove that side-effecting tools **cannot execute** without a valid capability token.
+
+- Attempt tool execute without token → must fail closed.
+- Attempt tool execute with token but wrong args hash → must fail closed.
+- Attempt tool execute with expired token → must fail closed.
+
+Required tests:
+- `test_tool_execute_requires_capability_token`
+- `test_capability_args_hash_mismatch_denied`
+- `test_capability_expired_denied`
+
+#### Proof C — Approval binding (TOCTOU-safe)
+
+Goal: prove “approved preview” cannot be swapped at commit time.
+
+- Preview tool call (canonical args hash A) → policy returns `needs_approval`.
+- Approve preview → capability minted bound to hash A.
+- Try to commit with args hash B → must fail closed.
+
+Required test:
+- `test_approval_binding_hash_enforced`
+
+#### Proof D — Crash/resume idempotency (no duplicate side effects)
+
+Goal: prove a crash between “intent recorded” and “tool executed” does not duplicate side effects.
+
+Scenario (classic):
+1) Reserve outbox intent (durable).
+2) Crash before tool execution ack is persisted.
+3) Resume → kernel should either:
+   - detect the intent was already executed (idempotency), or
+   - execute exactly once with the same idempotency key.
+
+Required tests:
+- `test_resume_does_not_duplicate_side_effect`
+- `test_outbox_idempotency_key_stable_across_retries`
+
+### 21.2 CI/CD release gates (minimum bar)
+
+A sane default pipeline:
+
+- **Static gates:**
+  - ruff + mypy strict
+  - import-linter contracts (core purity; strategy boundary)
+  - dependency audit (e.g., `pip-audit`) for critical CVEs
+- **Unit tests:** fast, deterministic; run on every PR
+- **Integration tests:** include at least one live tool adapter in a sandbox environment
+- **Proof suite (§21.1):** required before merge to main and before release
+
+### 21.3 Fault injection (chaos, but targeted)
+
+These tests are cheap and catch real incidents early:
+
+- Kill strategy process mid-propose → kernel fails closed, run is resumable.
+- Policy engine timeout/unavailable → default deny; run pauses or fails safe (per config).
+- Tool adapter timeout → outbox retry behavior matches policy; no duplicate side effects.
+- Persistence transient failure during append → run resumes without state corruption.
+- Clock skew simulation → token expiry logic tolerates allowed skew; fails closed beyond it.
+
+### 21.4 Security regression cases (prompt injection and “weird inputs”)
+
+Add regression cases for:
+- Untrusted content attempting to add tool calls (“ignore instructions and do X”).
+- Oversized observations and truncated content behavior (fail closed, logged).
+- Strategy returning unknown fields / malformed proposals (schema reject).
+- Tool args canonicalization edge cases (ordering, floats, unicode normalization).
+
+The vibe you’re aiming for: **the system refuses weirdness by construction, not by heroism.**
+
 ## Appendix A — Policy bundle skeleton (data-only)
 
 ```yaml
@@ -2319,6 +2702,51 @@ rules:
 ---
 
 ## Appendix B — Kernel invariants test index (template)
+
+
+This is the “index card” version. The full must-pass proofs are in §21.
+
+**Recommended minimum test set (by invariant):**
+
+- **K1 (canonicalization/hash stability)**
+  - `test_stable_hash_is_stable_across_runs`
+  - `test_canonical_json_normalizes_ordering`
+- **K2 (deterministic orchestrator)**
+  - `test_illegal_transition_denied`
+  - `test_max_steps_enforced`
+  - `test_abort_quarantines_late_results`
+- **K3 (model boundary)**
+  - `test_prompt_hash_recorded`
+  - `test_structured_output_repair_is_bounded`
+  - `test_model_timeout_fails_closed`
+- **K4 (tool executor)**
+  - `test_tool_args_schema_validation`
+  - `test_idempotency_key_kernel_generated`
+  - `test_tool_timeout_is_typed_error`
+- **K5 (policy/reference monitor)**
+  - `test_default_deny`
+  - `test_two_phase_preview_then_commit`
+  - `test_binding_hash_enforced`
+- **K6 (budgets/retries/backpressure)**
+  - `test_budget_enforced`
+  - `test_retry_bounds_enforced`
+  - `test_overload_fails_fast`
+- **K7 (verifiers)**
+  - `test_verifier_veto_blocks_execution`
+- **K9 (audit ledger)**
+  - `test_redaction_before_write`
+  - `test_hash_chain_verifies`
+- **K10 (outbox/idempotency)**
+  - `test_resume_does_not_duplicate_side_effect`
+  - `test_outbox_deduplication`
+- **K11 (record/replay)**
+  - `test_replay_blocks_external_calls`
+  - `test_replay_produces_same_state_hash`
+- **K18 (sanitization/channel separation)**
+  - `test_untrusted_content_never_enters_instruction_channel`
+  - `test_context_renderer_wraps_untrusted_data`
+
+---
 
 - K1: canonicalization/hash stability
 - K2: illegal transition denied; bounded loop; abort semantics
