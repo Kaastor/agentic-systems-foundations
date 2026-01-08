@@ -1,8 +1,8 @@
 # Kernel Implementation Playbook
 **Status:** Staff-level reference implementation guide for the Kernel Blueprint (TCB)  
 **Core language:** Python  
-**Version:** v1.0  
-**Last updated:** 2026-01-06
+**Version:** v1.1  
+**Last updated:** 2026-01-08
 
 ---
 
@@ -20,6 +20,95 @@ This playbook focuses on:
 - implementation patterns that are **boring, deterministic, testable**,
 - code snippets that are **copy‑pasteable** and close to production quality,
 - a build sequence that yields a working kernel early, then hardens safely.
+
+---
+
+## 0.1 Agentic system properties crosswalk
+
+Map the common agentic system properties to concrete kernel subsystems you will implement here, grouped by theme:
+
+**Enforcement and authorization**
+- **Complete mediation:** K4 tool executor (tools cannot bypass executor), K5 reference monitor + policy gate, and the strategy boundary in §1.1.
+- **External enforcement over internal instruction:** strategy outputs are proposals; K5 policy + K4 executor enforce effects.
+- **Capability contracts / tool law:** K4 tool specs (purpose, risk tier, IO schemas, scope, reversibility) + K5 authorization barrier.
+- **Side effects gated:** K5 two-phase propose -> preview -> approve -> commit, plus K10 outbox/idempotency and K15 approval UX.
+- **Least privilege / capability scoping:** K4 tool manifest + K5 policy + K14 identity/secrets.
+- **Scope confinement (read vs write, domain/resource allowlists):** K4 tool manifest + K5 parameter constraints.
+- **Identity and non-human principals:** K14 scoped credentials + K4 principal metadata.
+- **Security hardening / sink-safe tool interfaces:** K4 sink-safe execution + K8 sandboxing + K14 secrets.
+
+**Determinism and bounded execution**
+- **Deterministic control (explicit state machine):** K2 orchestrator + K1 state model.
+- **Deterministic validation / typed interfaces:** K1 ABI + K3 model boundary + K4 tool executor + K7 schema checks.
+- **Fail-closed defaults:** K3 invalid output handling + K5 deny by default + K6 budget stops + K18 sanitization.
+- **Bounded autonomy:** K2 stop conditions + K6 budgets/loop controls/circuit breakers (K15 safe mode for degradation).
+- **Idempotency + resumability:** K4 idempotency keys + K10 outbox/resume semantics.
+- **Breakpoints/watchlist triggers:** K6 budget thresholds + K9 alerts + K15 kill switch.
+
+**Verification, evidence, and release**
+- **Independent verification:** K7 verification layer (veto path), with deterministic checks for high-risk actions.
+- **Testability / evidence-backed claims:** K12 eval harness + invariant tests for K1 to K7.
+- **Audit + replay:** K9 audit ledger + K10 persistence/outbox + K11 replay hooks.
+- **Observability + accountability (tamper-evident audit):** K9 traces/metrics/ledger + redaction at ingestion.
+- **Reproducibility / fault injection:** K11 record/replay + deterministic fault injection.
+- **Eval gates + rollback:** K12 eval harness + K16 change management/rollback.
+- **Governance and risk management:** K12 eval gates + K16 change management + risk register in adoption playbook.
+- **Operational hardening / continuous response:** K6 circuit breakers + K15 safe mode + K16 rollback + K9 monitoring.
+
+**Data, memory, and threat handling**
+- **Untrusted data discipline (data != instructions):** K18 sanitization + K13 context compiler.
+- **Threat model / adversarial inputs:** K18 sanitization + K8 sandboxing + K5 policy constraints.
+- **Isolation / sandboxing:** K8 isolation boundaries for untrusted execution.
+- **Memory governance:** K13 provenance, TTL, and retention controls.
+
+**Architecture and human factors**
+- **Method-agnosticism / replaceable strategies:** architecture boundary in §1.2 + K1 ABI + K17 portability.
+- **Portability / exportability:** K17 exportable bundles, traces, and schemas.
+- **Human oversight + action transparency:** K9 action ledger + K15 preview/approve/deny + pause/stop/takeover.
+- **Multi-agent isolation and cross-agent validation:** K5 policy boundaries + K13 tenant isolation + K9 trace correlation.
+- **Simplicity / least-agentic pattern:** adoption guidance + replaceable strategies in §1.2.
+
+### Lite coverage (teaching track)
+
+Lite scope follows `adoption.md` §7.2. Coverage codes:
+- Full: in Lite scope without simplification
+- Lite: included but simplified
+- Partial: subset of property covered
+- Excluded: not in Lite scope
+
+| Group | Property | Lite coverage | Why (teaching scope) |
+| --- | --- | --- | --- |
+| Enforcement | Complete mediation | Lite | K4 full + K5 lite gate; no binding hash |
+| Enforcement | External enforcement over internal instruction | Lite | Strategy boundary + K5 lite enforcement |
+| Enforcement | Capability contracts / tool law | Lite | K4 schemas/specs; K5 lite authorization |
+| Enforcement | Side effects gated | Lite | CLI approval + allowlist; no preview/binding hash; K10 lite outbox |
+| Enforcement | Least privilege / capability scoping | Partial | Tool allowlist only; no K14 secrets broker |
+| Enforcement | Scope confinement (read vs write, domain/resource allowlists) | Partial | Simple allowlist; no rich param constraints |
+| Enforcement | Identity and non-human principals | Excluded | K14 excluded in lite |
+| Enforcement | Security hardening / sink-safe tool interfaces | Partial | K4 sink-safe patterns; no K8 sandbox/K14 secrets |
+| Determinism | Deterministic control (explicit state machine) | Full | K1/K2 full in lite |
+| Determinism | Deterministic validation / typed interfaces | Lite | K1 full, K3 basic, K4 full, K7 lite |
+| Determinism | Fail-closed defaults | Lite | K3 basic + K5 lite + K6 caps + K18 |
+| Determinism | Bounded autonomy | Partial | K2/K6 full; no K15 safe mode |
+| Determinism | Idempotency + resumability | Lite | K4 full + K10 lite outbox |
+| Determinism | Breakpoints/watchlist triggers | Partial | K6 caps; no K9 alerting or K15 kill switch |
+| Verification | Independent verification | Lite | K7 lite schema checks only |
+| Verification | Testability / evidence-backed claims | Partial | Unit/invariant tests; no K12 eval gates |
+| Verification | Audit + replay | Partial | K9 lite audit + K10 lite; no K11 replay |
+| Verification | Observability + accountability (tamper-evident audit) | Partial | JSONL audit, no hash chain |
+| Verification | Reproducibility / fault injection | Excluded | K11 excluded |
+| Verification | Eval gates + rollback | Excluded | K12/K16 excluded |
+| Verification | Governance and risk management | Excluded | Risk register/release governance not in lite |
+| Verification | Operational hardening / continuous response | Partial | K6 caps only; no K15 safe mode or K16 rollback |
+| Data | Untrusted data discipline (data != instructions) | Partial | K18 full; no K13 context governance |
+| Data | Threat model / adversarial inputs | Partial | K18 sanitization; no K8 sandbox |
+| Data | Isolation / sandboxing | Excluded | K8 excluded |
+| Data | Memory governance | Excluded | K13 excluded |
+| Architecture | Method-agnosticism / replaceable strategies | Full | Architecture boundary kept in lite |
+| Architecture | Portability / exportability | Excluded | K17 excluded |
+| Architecture | Human oversight + action transparency | Partial | CLI approval + JSONL log; no K15 pause/stop UX |
+| Architecture | Multi-agent isolation and cross-agent validation | Excluded | Multi-tenant excluded |
+| Architecture | Simplicity / least-agentic pattern | Full | Teaching track emphasizes minimal agentic |
 
 ---
 
@@ -64,6 +153,289 @@ If it can:
 
 **Design goal:** a strategy can be swapped without changing safety claims.
 
+
+### 1.3 Upgrade: make Strategy *actually untrusted* (process isolation)
+
+Your current boundary enforcement (packaging + import-linter + “no tool handles”) is **good engineering** — but it is still an *in‑process* trust boundary. In real codebases, “in‑process” boundaries slowly erode under pressure (“just this one helper import…”) and you discover you’ve built a security perimeter out of vibes.
+
+A production‑grade elegance upgrade is to make your most important rule:
+
+> **Strategies propose. The kernel disposes.**
+
+…a **physics constraint** via process isolation.
+
+**Recommended shape**
+- Run **kernel_tcb** as the only process allowed to:
+  - execute tools / touch secrets,
+  - write audit/outbox/state,
+  - authorize side effects.
+- Run **strategy** in a separate process (or container / sandbox) that can only:
+  - read sanitized observations,
+  - propose typed intents,
+  - receive outcomes / next observations.
+
+Start embedded if you must — but **design the API as if strategy is remote** so you can flip the switch later without rewriting your invariants.
+
+#### Strategy RPC ABI (kernel-owned)
+
+Treat strategy outputs as **untrusted input**: the kernel validates them with strict schemas and rejects anything outside the contract.
+
+```python
+# kernel_tcb/strategy_rpc/abi.py
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+from uuid import UUID
+
+from kernel_tcb.abi.strategy import StrategyContext, StrategyProposal
+
+class StrategyProposeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trace_id: UUID
+    run_id: UUID
+    strategy_id: str
+    # the entire context is already sanitized/typed (K18/K1)
+    ctx: StrategyContext
+
+class StrategyProposeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trace_id: UUID
+    run_id: UUID
+    strategy_id: str
+    proposal: StrategyProposal
+    # non-authoritative debug fields (never used for authorization)
+    debug: dict = Field(default_factory=dict)
+```
+
+**Transport choices (in order):**
+1) **Unix domain socket** + HTTP/JSON (simple, local-only, easy ops).
+2) **gRPC** over localhost (great schemas, better performance, nicer streaming).
+3) Full service-to-service (mTLS, service discovery) once you need horizontal scaling.
+
+#### Strategy “host” sandbox profile (recommended)
+
+A strategy process should run with a **restricted profile** by default:
+
+- **No network** (unless explicitly required for a non-sensitive purpose).
+- **No environment secrets** (empty env; no cloud creds; no DB creds).
+- **Read-only filesystem** (or a tiny temp dir).
+- **Resource caps** (CPU/mem/wall time) independent of kernel budgets (K6).
+- **Crash-only** tolerance (kernel treats strategy failure as a typed error; fail closed).
+
+This is distinct from K8 “execute untrusted code”; here you’re isolating *your own* strategy code because humans are fallible and deadlines are undefeated.
+
+#### Migration path: in-proc today, service later
+
+Keep the kernel interface stable by using a port adapter.
+
+```python
+# kernel_tcb/abi/runtime.py (unchanged public surface)
+from typing import Protocol
+from kernel_tcb.abi.strategy import StrategyContext, StrategyProposal
+
+class StrategyPort(Protocol):
+    strategy_id: str
+    def propose(self, ctx: StrategyContext) -> StrategyProposal: ...
+```
+
+- **In-process**: `InProcessStrategyAdapter(Strategy)` implements `StrategyPort`.
+- **Out-of-process**: `RpcStrategyClient(...)` implements `StrategyPort` using the ABI above.
+
+**Kernel invariant:** regardless of deployment, a strategy never receives tool handles, secrets, policy decisions, or persistence writers.
+
+### 1.4 Upgrade: make the kernel a reducer + effect interpreter (single side-effect pipeline)
+
+Your playbook already wants deterministic control (K2) and explicit typed boundaries (K1). The cleanest way to **prevent orchestration drift** is to formalize the runtime as:
+
+- **KernelCore** (pure-ish):  
+  `step(state, observation) -> (new_state, effects[])`
+- **EffectRunner** (I/O):  
+  executes effects (model/tool/policy/approval/persist/audit), returning new observations
+- **EventSink**:  
+  every effect produces trace/audit events (K9) *as a contract*
+
+This turns “don’t do side effects ad‑hoc” into “there is only one pipeline where I/O can exist.”
+
+#### Effect ABI (typed, append-only)
+
+```python
+# kernel_tcb/effects/abi.py
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, Literal
+
+from kernel_tcb.model.abi import ModelRequest
+from kernel_tcb.tools.ports import ToolMeta
+
+class Effect(BaseModel):
+    # Effects are inert data; the runner is the only place where I/O happens.
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trace_id: str
+    run_id: str
+
+class EmitAudit(Effect):
+    kind: Literal["emit_audit"] = "emit_audit"
+    name: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+class PersistCheckpoint(Effect):
+    kind: Literal["persist_checkpoint"] = "persist_checkpoint"
+    state_snapshot: dict[str, Any]  # canonical kernel state (K1)
+
+class CallStrategy(Effect):
+    kind: Literal["call_strategy"] = "call_strategy"
+    ctx: dict[str, Any]  # StrategyContext canonical JSON (K1)
+
+class CallModel(Effect):
+    kind: Literal["call_model"] = "call_model"
+    req: ModelRequest
+
+class ToolPreview(Effect):
+    kind: Literal["tool_preview"] = "tool_preview"
+    tool_name: str
+    args: dict[str, Any]
+    meta: ToolMeta
+
+class ToolExecute(Effect):
+    kind: Literal["tool_execute"] = "tool_execute"
+    tool_name: str
+    args: dict[str, Any]
+    meta: ToolMeta
+    capability_token: str | None = None  # K5 capability grant (see §12.6)
+
+KernelEffect = (
+    EmitAudit
+    | PersistCheckpoint
+    | CallStrategy
+    | CallModel
+    | ToolPreview
+    | ToolExecute
+)
+```
+
+Notice what’s *not* here: no raw SDK clients, no database sessions, no “just call tool()”. Effects are inert data.
+
+#### KernelCore signature (testable, replayable)
+
+```python
+# kernel_tcb/core/core.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from kernel_tcb.effects.abi import KernelEffect
+
+@dataclass(frozen=True)
+class CoreState:
+    fsm_state: str
+    step: int
+    # plus whatever else your K1 state model contains
+
+class Observation(Protocol):
+    # typed observations: model responses, tool results, approval decisions, etc.
+    kind: str
+
+class KernelCore(Protocol):
+    def step(self, state: CoreState, obs: Observation) -> tuple[CoreState, list[KernelEffect]]: ...
+```
+
+A “pure” core is optional; a **pure-ish** core is the goal: it should be deterministic given `(state, obs)`.
+
+#### EffectRunner (the only place with I/O)
+
+```python
+# kernel_tcb/effects/runner.py
+from __future__ import annotations
+from typing import Iterable
+
+from kernel_tcb.effects.abi import KernelEffect, EmitAudit, PersistCheckpoint, CallModel, ToolPreview, ToolExecute
+from kernel_tcb.model.boundary import ModelBoundary
+from kernel_tcb.tools.executor import ToolExecutor
+
+class EffectRunner:
+    def __init__(self, *, model: ModelBoundary, tools: ToolExecutor, audit: "AuditLedger", store: "RunStore"):
+        self._model = model
+        self._tools = tools
+        self._audit = audit
+        self._store = store
+
+    def run(self, effects: Iterable[KernelEffect]) -> list[object]:
+        observations: list[object] = []
+        for eff in effects:
+            if isinstance(eff, EmitAudit):
+                self._audit.emit(trace_id=eff.trace_id, run_id=eff.run_id, name=eff.name, payload=eff.payload)
+                observations.append({"kind": "audit_emitted", "name": eff.name})
+
+            elif isinstance(eff, PersistCheckpoint):
+                self._store.save_checkpoint(run_id=eff.run_id, state_snapshot=eff.state_snapshot)
+                observations.append({"kind": "checkpoint_saved"})
+
+            elif isinstance(eff, CallModel):
+                resp = self._model.complete_text(messages=eff.req.messages, config=eff.req.config)
+                observations.append({"kind": "model_response", "resp": resp})
+
+            elif isinstance(eff, ToolPreview):
+                r = self._tools.preview(tool_name=eff.tool_name, args=eff.args, meta=eff.meta)
+                observations.append({"kind": "tool_preview_result", "tool": eff.tool_name, "result": r})
+
+            elif isinstance(eff, ToolExecute):
+                r = self._tools.execute(
+                    tool_name=eff.tool_name,
+                    args=eff.args,
+                    meta=eff.meta,
+                    capability_token=eff.capability_token,
+                )
+                observations.append({"kind": "tool_execute_result", "tool": eff.tool_name, "result": r})
+
+            else:
+                raise TypeError(f"unknown effect: {type(eff)}")
+        return observations
+```
+
+**Structural win:** you can now enforce ordering constraints mechanically, e.g. “no `ToolExecute` effect can be emitted unless a `policy_decision` event exists for the same args hash.”
+
+### 1.5 Upgrade: event-sourced run state (optional, very elegant)
+
+You already have the ingredients: audit ledger (K9), persistence/outbox (K10), replay hooks (K11). The coherence upgrade is to make a single statement true:
+
+- **State is a fold of events.**
+
+Implementation sketch:
+- Every significant transition/effect emits a **RunEvent** into an append-only per-run stream.
+- “Current state” is derived by replaying events through a reducer.
+- Add **snapshots** every N events for performance.
+- The outbox can be derived from events or maintained as a separate table fed by them.
+
+This makes “resume” and “time travel debugging” boring in the best way.
+
+(Concrete storage patterns are in §13.2.)
+
+### 1.6 Upgrade: capability tokens (authorization as an object)
+
+Instead of relying on “tool name + args + policy check happened somewhere earlier”, have the policy layer mint a **capability grant token** that must be presented to execute.
+
+This is capability-based security:
+- execution requires possessing the permit object,
+- the permit is logged evidence of authorization,
+- distributed executors can verify permits without shared in-memory policy state.
+
+(Concrete token design + code is in §12.6.)
+
+### 1.7 Upgrade: treat context as a typed program, not a string
+
+You already enforce “data ≠ instructions” (K18). The elegance move is to make prompt construction **structural**:
+
+- Strategy never passes raw “context strings”.
+- Strategy passes references to `SanitizedContent` items + structured facts.
+- Kernel compiles a typed `ContextPlan`, then renders provider messages.
+
+(Concrete `ContextPlan`/renderer patterns are in §7.4.)
+
 ---
 
 ## 2. Repo layout and guardrails
@@ -79,7 +451,7 @@ repo/
     kernel_tcb/                  # ✅ THE TCB (small, dependency-light)
     strategies/                  # ❌ swap freely
     tool_adapters/               # ❌ integrations/connectors
-    apps/                        # ❌ API server / workers / CLI
+    apps/                        # ❌ API server / workers / CLI / strategy host
 
   policies/                      # versioned policy bundles (+ tests)
   prompts/                       # prompt bundles (hashed/versioned)
@@ -92,7 +464,8 @@ repo/
 
 1) **Packaging boundary:** `kernel_tcb` is a separate package.  
 2) **Import-lint contracts:** prevent dependency erosion.  
-3) **Runtime capability design:** strategies never receive tool handles.
+3) **Runtime capability design:** strategies never receive tool handles.  
+4) **Process boundary (recommended):** run strategy out-of-process (or sandboxed) behind a typed RPC; the kernel remains the only process that can execute tools, access secrets, or write audit/outbox/state.
 
 Example `contracts/importlinter.contracts.ini`:
 
@@ -160,6 +533,23 @@ For every kernel subsystem you implement:
 If any step is missing, treat the subsystem as “not implemented.”
 
 ### 4.1 From empty repo → Level 2 (read-only kernel)
+
+#### Step 0 — Lock the two “physics constraints” early (recommended)
+
+Before you implement any sophisticated capability, lock in the two design choices that prevent future safety drift:
+
+1) **Strategy is untrusted by construction** (a port you can run out-of-process).  
+2) **Kernel I/O is centralized** (reducer + effect interpreter, single side-effect pipeline).
+
+Deliverables:
+- `StrategyPort` protocol (kernel ABI) + `strategy_rpc` request/response schemas (even if unused initially).
+- `effects` ABI + `EffectRunner` skeleton; make orchestrator depend on effects, not on concrete SDKs.
+- A “no tool handles in StrategyContext” check enforced by typing + runtime validation.
+
+Required tests:
+- `test_strategy_proposal_schema_rejects_unknown_fields`
+- `test_kernel_core_has_no_ports_injected` (core cannot perform I/O)
+- `test_effect_runner_is_only_place_tools_are_called` (can be done with spies/mocks)
 
 #### Step 1 — ABI + hashing (K1)
 Deliverables:
@@ -264,17 +654,20 @@ Deliverables:
 - allowlists + deterministic constraints,
 - two-phase execution (propose → preview → approve → commit),
 - approval binding hash (tool + canonical args + preview hash),
-- policy evaluated at propose-time **and** commit-time.
+- **capability grant tokens** (policy issues a permit object; tool execution requires it),
+- policy evaluated at propose-time **and** commit-time (TOCTOU-safe).
 
 Required tests:
 - `test_no_write_without_gate`
 - `test_approval_binding_hash_required`
 - `test_toctou_hash_mismatch_denied`
+- `test_commit_requires_capability_token`
 
 #### Step 10 — Outbox + resume safety (K10)
 Deliverables:
 - durable outbox intent records,
-- idempotency semantics documented per tool.
+- idempotency semantics documented per tool,
+- (optional) append-only **run event stream** + snapshots if adopting event-sourced state (§13.2).
 
 Required tests:
 - `test_resume_does_not_duplicate_side_effect`
@@ -344,7 +737,7 @@ class Strategy(Protocol):
     def propose(self, ctx: "StrategyContext") -> "StrategyProposal": ...
 
 class KernelRuntime(Protocol):
-    def run(self, req: KernelRequest, *, strategy: Strategy) -> KernelResponse: ...
+    def run(self, req: KernelRequest, *, strategy: StrategyPort) -> KernelResponse: ...
     def resume(self, *, run_id: UUID) -> KernelResponse: ...
     def cancel(self, *, run_id: UUID, reason: str) -> None: ...
 ```
@@ -387,12 +780,23 @@ class StrategyContext(BaseModel):
     tool_manifest: ToolManifest
     observations: list[Observation]
 
+class ContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Untrusted text must only arrive as SanitizedContent; the kernel renderer will
+    # place it into a data channel (never system/developer).
+    data: list[SanitizedContent] = Field(default_factory=list)
+
+    # Structured facts (from extraction, memory, or tools). These are still untrusted
+    # unless a verifier asserts otherwise, but they are not treated as instructions.
+    facts: dict = Field(default_factory=dict)
+
 class ModelCallIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["model_call"] = "model_call"
     prompt_ref: str
-    input: dict
+    context: ContextRequest
     output_schema_ref: str | None = None
 
 class ToolCallIntent(BaseModel):
@@ -419,6 +823,10 @@ class StrategyProposal(BaseModel):
     stop: bool = False
     notes: dict = Field(default_factory=dict)
 ```
+
+**Deployment note:** `StrategyPort` is deliberately small so you can run strategies **in-process** during early development and later swap to an **out-of-process** `RpcStrategyClient` (Unix socket / gRPC) without changing kernel invariants. The kernel still treats proposals as untrusted input and validates them strictly before acting.
+
+
 
 ---
 
@@ -506,24 +914,152 @@ def sanitize_text(*, text: str, provenance: dict) -> SanitizedContent:
 ```python
 # kernel_tcb/model/prompting.py
 from __future__ import annotations
+
+import json
 from pydantic import BaseModel, ConfigDict
 from typing import Literal
+
+from kernel_tcb.sanitize.envelope import SanitizedContent
 
 class LLMMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     role: Literal["system","developer","user","assistant","tool"]
     content: str
 
-def build_messages(*, system: str, developer: str, data_blobs: list[str], user: str) -> list[LLMMessage]:
+def _render_untrusted(item: SanitizedContent) -> str:
+    meta = {
+        "classification": item.classification,
+        "suspicion_flags": item.suspicion_flags,
+        "provenance": item.provenance,
+        "unprocessed": item.unprocessed,
+    }
+    return (
+        "[UNTRUSTED_DATA]\n"
+        + json.dumps(meta, ensure_ascii=False, sort_keys=True)
+        + "\n---\n"
+        + item.quoted_data
+        + "\n[/UNTRUSTED_DATA]"
+    )
+
+def build_messages(*, system: str, developer: str, data_items: list[SanitizedContent], user: str) -> list[LLMMessage]:
     msgs: list[LLMMessage] = [
-        LLMMessage(role="system", content=system),
-        LLMMessage(role="developer", content=developer),
+        LLMMessage(role="system", content=system),       # kernel-owned instructions
+        LLMMessage(role="developer", content=developer), # kernel-owned instructions
     ]
-    for blob in data_blobs:
-        msgs.append(LLMMessage(role="user", content=f"[UNTRUSTED_DATA]\n{blob}\n[/UNTRUSTED_DATA]"))
+    for item in data_items:
+        msgs.append(LLMMessage(role="user", content=_render_untrusted(item)))
     msgs.append(LLMMessage(role="user", content=user))
     return msgs
 ```
+
+
+### 7.4 Recommended: ContextPlan + ContextCompiler (typed prompt program)
+
+The “data ≠ instructions” rule becomes much harder to violate if prompt construction is not a pile of strings.
+
+**Pattern**
+- Strategy produces *typed* `ContextRequest` (see §5.2): `{data: [SanitizedContent], facts: {...}}`.
+- Kernel compiles a **typed** `ContextPlan` (append-only items).
+- Renderer turns the plan into provider messages and mechanically enforces:
+  - only kernel-owned instructions may appear in `system`/`developer`,
+  - untrusted text is only rendered via `SanitizedContent.quoted_data` inside a data channel.
+
+```python
+# kernel_tcb/context/plan.py
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, Literal
+
+from kernel_tcb.abi.base import ABIModel
+from kernel_tcb.model.prompting import LLMMessage, _render_untrusted
+from kernel_tcb.sanitize.envelope import SanitizedContent
+
+class InstructionBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["instruction"] = "instruction"
+    role: Literal["system", "developer"]
+    text: str
+
+class UntrustedDataBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["untrusted_data"] = "untrusted_data"
+    item: SanitizedContent
+
+class FactsBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["facts"] = "facts"
+    facts: dict[str, Any] = Field(default_factory=dict)
+
+class UserQueryBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["user_query"] = "user_query"
+    text: str
+
+ContextItem = InstructionBlock | UntrustedDataBlock | FactsBlock | UserQueryBlock
+
+class ContextPlan(ABIModel):
+    schema_version: str = "v1"
+    items: list[ContextItem]
+```
+
+```python
+# kernel_tcb/context/compiler.py
+from __future__ import annotations
+from kernel_tcb.abi.strategy import ContextRequest
+from kernel_tcb.context.plan import ContextPlan, InstructionBlock, UntrustedDataBlock, FactsBlock, UserQueryBlock
+
+def compile_context(*, system: str, developer: str, req: ContextRequest, user_query: str) -> ContextPlan:
+    items = [
+        InstructionBlock(role="system", text=system),
+        InstructionBlock(role="developer", text=developer),
+        *[UntrustedDataBlock(item=i) for i in req.data],
+        FactsBlock(facts=req.facts),
+        UserQueryBlock(text=user_query),
+    ]
+    return ContextPlan(items=items)
+```
+
+```python
+# kernel_tcb/context/renderer.py
+from __future__ import annotations
+
+import json
+from kernel_tcb.context.plan import ContextPlan, InstructionBlock, UntrustedDataBlock, FactsBlock, UserQueryBlock
+from kernel_tcb.model.prompting import LLMMessage, _render_untrusted
+
+def render(plan: ContextPlan) -> list[LLMMessage]:
+    msgs: list[LLMMessage] = []
+
+    for it in plan.items:
+        if isinstance(it, InstructionBlock):
+            msgs.append(LLMMessage(role=it.role, content=it.text))
+
+        elif isinstance(it, UntrustedDataBlock):
+            msgs.append(LLMMessage(role="user", content=_render_untrusted(it.item)))
+
+        elif isinstance(it, FactsBlock) and it.facts:
+            msgs.append(LLMMessage(role="user", content="[STRUCTURED_FACTS]\n" + json.dumps(it.facts, ensure_ascii=False, sort_keys=True) + "\n[/STRUCTURED_FACTS]"))
+
+        elif isinstance(it, UserQueryBlock):
+            msgs.append(LLMMessage(role="user", content=it.text))
+
+        else:
+            raise TypeError(f"unknown context item: {type(it)}")
+
+    # Mechanical guardrail: if anything slipped, fail closed
+    for m in msgs:
+        if m.role in ("system", "developer") and "[UNTRUSTED_DATA]" in m.content:
+            raise ValueError("untrusted_data_in_instruction_channel")
+
+    return msgs
+```
+
+**Practical benefits**
+- You can audit/inspect the `ContextPlan` without dumping full prompts.
+- The plan is hashable (`ContextPlan.stable_hash(...)`), which is great for replay and bundle manifests.
+- Prompt injection resilience stops being “best effort” and becomes “the compiler won’t let you.”
+
 
 **Kernel invariant:** sanitizer outputs never enter `system`/`developer`.
 
@@ -617,6 +1153,68 @@ class AuditLedger:
 ---
 
 ## 9. K2 + K6 — Deterministic orchestrator with budgets & cancellation
+
+
+### 9.0 Recommended: orchestrator wiring as event/effect machine
+
+If you adopt the reducer + effect interpreter pattern (see §1.4), the orchestrator becomes a small, boring loop:
+
+1) Take the next observation/event  
+2) Run `KernelCore.step(state, obs)` to get `(state’, effects[])`  
+3) Execute `effects[]` via `EffectRunner` (the only I/O path)  
+4) Enqueue resulting observations and continue until a terminal state or budget stop
+
+```python
+# kernel_tcb/orchestrator/runtime.py
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass
+
+from kernel_tcb.budgets.engine import BudgetEngine
+from kernel_tcb.core.core import CoreState, KernelCore
+from kernel_tcb.effects.runner import EffectRunner
+
+@dataclass
+class RunResult:
+    status: str
+    final_output: str | None = None
+
+class Orchestrator:
+    def __init__(self, *, core: KernelCore, runner: EffectRunner, budgets: BudgetEngine, audit: "AuditLedger"):
+        self._core = core
+        self._runner = runner
+        self._budgets = budgets
+        self._audit = audit
+
+    def run(self, *, initial_state: CoreState, initial_observation: object) -> RunResult:
+        state = initial_state
+        q = deque([initial_observation])
+
+        while q:
+            self._budgets.assert_within_limits(state=state)  # K6: fail closed on exhaustion
+
+            obs = q.popleft()
+            state, effects = self._core.step(state, obs)
+
+            # Optional: checkpoint after each state transition (or every N events)
+            # effects.append(PersistCheckpoint(state_snapshot=...))
+
+            produced = self._runner.run(effects)
+            q.extend(produced)
+
+            if state.fsm_state in ("DONE", "FAILED", "CANCELLED", "TIMEOUT"):
+                return RunResult(status=state.fsm_state.lower())
+
+        # Queue drained unexpectedly => treat as deterministic failure.
+        return RunResult(status="failed")
+```
+
+**Why this matters**
+- Orchestration drift becomes harder: every I/O is an explicit `Effect`.
+- Deterministic replay becomes natural: record `(obs, effects, produced)` triplets.
+- Testing becomes cheap: `KernelCore.step(...)` can be fuzzed without any real tools/models.
+
 
 ### 9.1 Explicit FSM (no “while model says”)
 
@@ -880,13 +1478,22 @@ class ToolAdapter(Protocol):
 ```python
 # kernel_tcb/tools/executor.py
 from __future__ import annotations
+
+from kernel_tcb.security.capabilities import CapabilityGrant, CapabilityTokens, compute_args_hash
 from kernel_tcb.tools.manifest import ToolManifest
 from kernel_tcb.tools.ports import ToolAdapter, ToolMeta, ToolResult
 
 class ToolExecutor:
-    def __init__(self, *, manifest: ToolManifest, adapters: dict[str, ToolAdapter]):
+    def __init__(
+        self,
+        *,
+        manifest: ToolManifest,
+        adapters: dict[str, ToolAdapter],
+        capabilities: CapabilityTokens,
+    ):
         self._manifest = manifest
         self._adapters = adapters
+        self._cap = capabilities
 
     def spec(self, tool_name: str):
         return self._manifest.get(tool_name)
@@ -898,10 +1505,35 @@ class ToolExecutor:
             return ToolResult(ok=True, output={"preview": None})
         return adapter.preview(args, meta)
 
-    def execute(self, *, tool_name: str, args: dict, meta: ToolMeta) -> ToolResult:
+    def execute(self, *, tool_name: str, args: dict, meta: ToolMeta, capability_token: str | None = None) -> ToolResult:
         spec = self._manifest.get(tool_name)
+
+        # Replay mode must be side-effect free.
         if meta.mode == "replay" and spec.has_side_effects:
             return ToolResult(ok=False, error={"code": "replay_forbids_side_effects"})
+
+        # Capability enforcement: side-effecting tools require a grant token.
+        if spec.has_side_effects:
+            if capability_token is None:
+                return ToolResult(ok=False, error={"code": "missing_capability"})
+
+            try:
+                grant: CapabilityGrant = self._cap.verify(capability_token)
+            except Exception as e:  # fail closed
+                return ToolResult(ok=False, error={"code": "invalid_capability", "detail": str(e)})
+
+            expected_args_hash = compute_args_hash(tool_name=tool_name, args=args)
+
+            if (
+                grant.phase != "commit"
+                or grant.tool_name != tool_name
+                or grant.args_hash != expected_args_hash
+                or grant.run_id != meta.run_id
+                or grant.principal != meta.principal
+                or grant.tenant_id != meta.tenant_id
+            ):
+                return ToolResult(ok=False, error={"code": "capability_mismatch"})
+
         return self._adapters[tool_name].execute(args, meta)
 ```
 
@@ -1022,17 +1654,29 @@ class PolicyEngine:
 # kernel_tcb/policy/reference_monitor.py
 from __future__ import annotations
 
+import time
+
 from kernel_tcb.policy.binding import compute_binding_hash
 from kernel_tcb.policy.engine import PolicyEngine
 from kernel_tcb.policy.approval_ports import ApprovalPort, ApprovalRequest
+from kernel_tcb.security.capabilities import CapabilityGrant, CapabilityTokens, compute_args_hash
 from kernel_tcb.tools.executor import ToolExecutor
 from kernel_tcb.tools.ports import ToolMeta, ToolResult
 
 class ReferenceMonitor:
-    def __init__(self, *, policy: PolicyEngine, approvals: ApprovalPort, tools: ToolExecutor, audit: "AuditLedger"):
+    def __init__(
+        self,
+        *,
+        policy: PolicyEngine,
+        approvals: ApprovalPort,
+        tools: ToolExecutor,
+        capabilities: CapabilityTokens,
+        audit: "AuditLedger",
+    ):
         self._policy = policy
         self._approvals = approvals
         self._tools = tools
+        self._cap = capabilities
         self._audit = audit
 
     def propose(self, *, trace_id, run_id, tool_name: str, args: dict, meta: ToolMeta) -> tuple[dict | None, str, int | None]:
@@ -1072,6 +1716,7 @@ class ReferenceMonitor:
         return preview, binding_hash, decision.expires_at_epoch
 
     def commit(self, *, trace_id, run_id, tool_name: str, args: dict, meta: ToolMeta, timeout_sec: int = 300) -> ToolResult:
+        # Recompute preview/binding hash at commit time (TOCTOU-safe).
         preview_result = self._tools.preview(tool_name=tool_name, args=args, meta=meta)
         binding_hash = compute_binding_hash(tool_name=tool_name, args=args, preview=preview_result.output)
 
@@ -1099,8 +1744,130 @@ class ReferenceMonitor:
             if dec.decision != "approve":
                 raise PermissionError("approval_denied")
 
-        return self._tools.execute(tool_name=tool_name, args=args, meta=meta)
+        # Mint a capability grant token that will be required by the tool executor.
+        capability_token: str | None = None
+        if spec.has_side_effects:
+            expires_at = int(time.time()) + timeout_sec
+            grant = CapabilityGrant(
+                phase="commit",
+                tool_name=tool_name,
+                args_hash=compute_args_hash(tool_name=tool_name, args=args),
+                binding_hash=binding_hash,
+                run_id=meta.run_id,
+                principal=meta.principal,
+                tenant_id=meta.tenant_id,
+                expires_at_epoch=expires_at,
+            )
+            capability_token = self._cap.sign(grant)
+
+            self._audit.emit(trace_id=trace_id, run_id=run_id, name="capability_issued", payload={
+                "tool": tool_name,
+                "args_hash": grant.args_hash,
+                "binding_hash": binding_hash,
+                "expires_at_epoch": expires_at,
+                "grant_hash": grant.stable_hash(domain="capability_grant"),
+            })
+
+        return self._tools.execute(tool_name=tool_name, args=args, meta=meta, capability_token=capability_token)
 ```
+
+
+### 12.6 Capability tokens (capability-based authorization)
+
+A **capability token** is a signed permit object. Tool execution requires presenting the permit, so “complete mediation” becomes a mechanical property of the codebase.
+
+**What the grant encodes**
+- tool identity (`tool_name`)
+- canonical args hash (`args_hash`)
+- phase (`preview` vs `commit`; in practice you mostly care about `commit`)
+- principal + tenant + run binding
+- expiry
+- optional approval binding hash (`binding_hash`)
+
+**Where this helps**
+- Prevents accidental bypass (“someone called execute() without policy”).
+- Makes approvals portable across distributed executors.
+- Turns authorization into an auditable artifact (log the grant hash / expiry).
+
+#### Reference implementation (HMAC, internal systems)
+
+```python
+# kernel_tcb/security/capabilities.py
+from __future__ import annotations
+
+import base64
+import hmac
+import hashlib
+import json
+import time
+from pydantic import BaseModel, ConfigDict
+from typing import Literal
+
+from kernel_tcb.abi.base import ABIModel
+from kernel_tcb.tools.canonical import canonical_json, stable_hash
+
+class CapabilityGrant(ABIModel):
+    # Append-only schema; rotate via schema_version if needed.
+    schema_version: str = "v1"
+
+    phase: Literal["preview", "commit"]
+    tool_name: str
+    args_hash: str
+    binding_hash: str | None = None
+
+    run_id: str
+    principal: str
+    tenant_id: str | None
+
+    expires_at_epoch: int
+
+def compute_args_hash(*, tool_name: str, args: dict) -> str:
+    # Domain-separated stable hash of tool+args (canonicalized).
+    return stable_hash("tool_args", {"tool_name": tool_name, "args": args})
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+class CapabilityTokens:
+    def __init__(self, *, secret_key: bytes):
+        if not secret_key:
+            raise ValueError("missing_secret_key")
+        self._key = secret_key
+
+    def sign(self, grant: CapabilityGrant) -> str:
+        payload_json = canonical_json(grant.model_dump())
+        sig = hmac.new(self._key, payload_json.encode("utf-8"), hashlib.sha256).digest()
+        return _b64url(payload_json.encode("utf-8")) + "." + _b64url(sig)
+
+    def verify(self, token: str) -> CapabilityGrant:
+        try:
+            payload_b64, sig_b64 = token.split(".", 1)
+        except ValueError as e:
+            raise ValueError("invalid_token_format") from e
+
+        payload = _b64url_decode(payload_b64)
+        sig = _b64url_decode(sig_b64)
+
+        expected = hmac.new(self._key, payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, sig):
+            raise ValueError("bad_signature")
+
+        data = json.loads(payload.decode("utf-8"))
+        grant = CapabilityGrant.model_validate(data)  # rejects unknown fields (via ABIModel)
+
+        if int(time.time()) > grant.expires_at_epoch:
+            raise ValueError("expired")
+
+        return grant
+```
+
+**Key management**
+- Keep `secret_key` in a KMS / secret store; rotate it like any other auth credential.
+- If you need cross-service verification without shared secrets, switch the signer to Ed25519 and publish a verify key.
 
 ---
 
@@ -1175,6 +1942,155 @@ class Outbox:
         )
         self._c.commit()
 ```
+
+
+### 13.2 Optional: event-sourced run state (append-only stream + snapshots)
+
+If you want the “single coherent story” property:
+
+- *What happened?* → events  
+- *What is the state?* → fold(events)  
+- *Can we reproduce?* → replay(events + recorded I/O)
+
+…implement a per-run event stream in persistence.
+
+**Rule:** the event stream is append-only; state is derived. Snapshots are an optimization.
+
+#### Minimal SQLite event store (reference)
+
+```python
+# kernel_tcb/persistence/event_store_sqlite.py
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+from kernel_tcb.tools.canonical import canonical_json, stable_hash
+
+@dataclass(frozen=True)
+class RunEvent:
+    run_id: str
+    seq: int
+    ts_epoch: float
+    event_type: str
+    payload: dict[str, Any]
+    payload_hash: str
+
+class EventStore:
+    def __init__(self, conn: sqlite3.Connection):
+        self._c = conn
+        self._c.execute(
+            "CREATE TABLE IF NOT EXISTS run_events ("
+            " run_id TEXT NOT NULL,"
+            " seq INTEGER NOT NULL,"
+            " ts_epoch REAL NOT NULL,"
+            " event_type TEXT NOT NULL,"
+            " payload_json TEXT NOT NULL,"
+            " payload_hash TEXT NOT NULL,"
+            " PRIMARY KEY (run_id, seq)"
+            ")"
+        )
+        self._c.execute("CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, seq)")
+        self._c.execute(
+            "CREATE TABLE IF NOT EXISTS run_snapshots ("
+            " run_id TEXT PRIMARY KEY,"
+            " last_seq INTEGER NOT NULL,"
+            " state_json TEXT NOT NULL,"
+            " state_hash TEXT NOT NULL"
+            ")"
+        )
+
+    def append(self, *, run_id: str, event_type: str, payload: dict[str, Any]) -> RunEvent:
+        ts = time.time()
+        payload_json = canonical_json(payload)
+        ph = stable_hash("run_event_payload", {"event_type": event_type, "payload": payload})
+        seq = self._next_seq(run_id)
+
+        self._c.execute(
+            "INSERT INTO run_events (run_id, seq, ts_epoch, event_type, payload_json, payload_hash) VALUES (?,?,?,?,?,?)",
+            (run_id, seq, ts, event_type, payload_json, ph),
+        )
+        self._c.commit()
+        return RunEvent(run_id=run_id, seq=seq, ts_epoch=ts, event_type=event_type, payload=payload, payload_hash=ph)
+
+    def iter_events(self, *, run_id: str, after_seq: int = 0) -> Iterable[RunEvent]:
+        rows = self._c.execute(
+            "SELECT run_id, seq, ts_epoch, event_type, payload_json, payload_hash "
+            "FROM run_events WHERE run_id=? AND seq>? ORDER BY seq ASC",
+            (run_id, after_seq),
+        )
+        for run_id, seq, ts, et, pj, ph in rows:
+            yield RunEvent(run_id=run_id, seq=seq, ts_epoch=ts, event_type=et, payload=json.loads(pj), payload_hash=ph)
+
+    def save_snapshot(self, *, run_id: str, last_seq: int, state: dict[str, Any]) -> None:
+        sj = canonical_json(state)
+        sh = stable_hash("run_state_snapshot", {"last_seq": last_seq, "state": state})
+        self._c.execute(
+            "INSERT INTO run_snapshots (run_id, last_seq, state_json, state_hash) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(run_id) DO UPDATE SET last_seq=excluded.last_seq, state_json=excluded.state_json, state_hash=excluded.state_hash",
+            (run_id, last_seq, sj, sh),
+        )
+        self._c.commit()
+
+    def load_snapshot(self, *, run_id: str) -> tuple[int, dict[str, Any]] | None:
+        row = self._c.execute(
+            "SELECT last_seq, state_json, state_hash FROM run_snapshots WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        last_seq, state_json, state_hash = row
+        state = json.loads(state_json)
+        expected = stable_hash("run_state_snapshot", {"last_seq": last_seq, "state": state})
+        if expected != state_hash:
+            raise ValueError("snapshot_hash_mismatch")
+        return int(last_seq), state
+
+    def _next_seq(self, run_id: str) -> int:
+        row = self._c.execute("SELECT COALESCE(MAX(seq), 0) FROM run_events WHERE run_id=?", (run_id,)).fetchone()
+        return int(row[0]) + 1
+```
+
+#### Reducer: derive state by replaying events
+
+Keep event evolution append-only: add new event types and fields; don’t mutate old ones.
+
+```python
+# kernel_tcb/persistence/reducer.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any
+
+from kernel_tcb.orchestrator.fsm import State
+
+@dataclass(frozen=True)
+class DerivedRunState:
+    fsm_state: State
+    step: int
+    # add other derived fields (budgets, last tool result hashes, etc.)
+
+def initial_state() -> DerivedRunState:
+    return DerivedRunState(fsm_state=State.START, step=0)
+
+def apply_event(s: DerivedRunState, *, event_type: str, payload: dict[str, Any]) -> DerivedRunState:
+    if event_type == "fsm_transition":
+        return DerivedRunState(fsm_state=State(payload["to"]), step=int(payload["step"]))
+    if event_type == "step_incremented":
+        return DerivedRunState(fsm_state=s.fsm_state, step=s.step + 1)
+    return s  # unknown events are ignored by older code (forward-compat strategy)
+```
+
+**Snapshot cadence:** every 25–100 events per run is typical. Snapshots make resume O(tail) instead of O(history).
+
+**Integration note:** you can implement the outbox as:
+- a *derived view* of events (“intent recorded”, “intent committed”), or
+- a separate table (as shown in §13.1) updated transactionally alongside the event append.
+
+Both are fine; choose based on operational comfort.
 
 ---
 
