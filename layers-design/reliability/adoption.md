@@ -28,6 +28,30 @@ The **kernel** is the **Trusted Computing Base (TCB)**: the smallest set of code
 ### 1.2 Strategy modules (userland)
 **Strategies** are replaceable modules that propose what to do (planner, prompts, routing, RAG, multi-agent coordination). They are allowed to be wrong. The kernel must remain safe anyway.
 
+### 1.2.1 Testbed modules (research harness)
+
+The **testbed** is the “wind tunnel” for agentic systems research: scenario packs + environment adapters + statistical harness that let you compare strategies *fairly* and *reproducibly*.
+
+**Where it lives (architecturally):**
+- The testbed is **kernel-adjacent but NOT TCB**. It should be a separate package/module that depends on kernel ports (K1/K2/K11/K12/K16), never the reverse.
+- The testbed MUST NOT weaken kernel invariants; it only selects **run modes** and **adapters**.
+
+**Mechanics vs methods:**
+- **Mechanics in kernel:** record/replay, eval harness, policy gating, deterministic orchestration.
+- **Methods in strategy:** planners/search/critique/RAG/etc.
+- Research iteration is: *swap strategies; keep kernel + testbed mechanics constant*.
+
+**Real tools in research (recommended, not forbidden):**
+- Use real tools when it increases external validity, but do it via:
+  - sandbox/staging endpoints or ephemeral tenants/accounts for write tools,
+  - `record` mode for reproducibility,
+  - `shadow` mode for preview-only “would-have” evaluation,
+  - `replay`/`sim` for deterministic regression + ablations.
+
+**Publishable baseline (rule of thumb):**
+If you want results you can defend in peer review, treat “research runs” as **Level 2 governance minimum** even if you have no end users: K11 + K12/K12a + K16-min are non-negotiable for credibility.
+
+
 ### 1.3 A practical rule
 Use the kernel/strategy boundary rule from `layers-design/reliability/implementation_playbook.md` ("Architecture you can defend in a review"). This guide assumes that split.
 
@@ -156,6 +180,7 @@ These artifacts are not “kernel subsystems,” but they are required to keep p
   - updated risk register (or an explicit “no risk impact” justification),
   - updated suite card/changelog if a gated eval suite changes,
   - a new `bundle_id` (K16-min).
+- If PR changes `testbed/`, `benchmarks/`, or eval suite definitions → run the benchmark gate(s), update suite cards/changelog, and require deterministic replay on any new “golden” cases.
 
 
 ---

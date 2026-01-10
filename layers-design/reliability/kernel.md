@@ -999,6 +999,45 @@ The kernel (§0-§13) is the **TCB (Trusted Computing Base)**. Everything below 
 
 ---
 
+### E6. Research Testbed (Wind Tunnel): Simulation + Replay + Real Tools
+
+**Add if:** you want to do publishable agent research (or keep a serious internal “wind tunnel” for strategy iteration).
+
+**Purpose:** run the *same* Strategy (planner/brain) against multiple environments (simulated, replayed, and real) **without changing the kernel’s safety claims**.
+
+**Key idea (layering):**
+- **Kernel provides mechanics**: strict ports, policy gating, record/replay hooks, deterministic orchestration, eval harness.
+- **Strategy provides methods**: planning/search/self-critique/RAG/etc. (swappable, not trusted).
+- **Testbed provides experimentation infrastructure**: scenario packs + environment adapters + statistical harness. It is **not** part of the kernel TCB.
+
+**Required kernel hooks (already in K1/K2/K11/K12/K16):**
+- Dependency injection to swap tool/model backends (`live` vs `sim` vs `replay`) without strategy changes.
+- Record/replay for model + tool I/O and key decision points.
+- Eval harness + corpus governance (suite cards, versioning, flake policy).
+
+**Standard run modes (recommended):**
+- `live`: production-like execution (normal policy + approvals).
+- `record`: same as `live`, but *records* model/tool I/O + decisions for reproducible replay.
+- `replay`: deterministic reproduction from recordings (**must be side-effect free**).
+- `sim`: deterministic simulated environment (no external calls; no write effects).
+- `shadow`: real reads + deterministic previews are allowed, but **commits are blocked** (useful for “as-if” evaluation).
+
+**Real tools in research (yes, but safely):**
+- Prefer **sandbox/staging endpoints** or **ephemeral tenants/accounts** for any tool with writes.
+- For side-effecting tools, use the kernel’s two-phase discipline: **Propose → Preview → Approve → Commit**.
+  - In `shadow` mode, allow Propose/Preview, forbid Commit.
+  - In `record` mode, allow Commit only under sandbox credentials (never production credentials).
+
+**Publishability checklist (what the testbed must emit):**
+- `bundle_id` (exact prompts/policies/tools/models), suite version, scenario IDs, seeds/time-source config.
+- Trajectory artifacts (trace + outcomes) with redaction, plus aggregate metrics with confidence intervals.
+- Clear “what was real vs simulated vs replayed” labeling per run.
+
+**Skip risk:** without this, you can’t tell “strategy improved” from “tool drift / judge drift / flake,” and your results will be painful to reproduce or review.
+
+
+---
+
 ### 14.1 Product Case Mapping
 
 | Product Type | Usually Requires | Often Optional | Critical Kernel |
@@ -1007,6 +1046,8 @@ The kernel (§0-§13) is the **TCB (Trusted Computing Base)**. Everything below 
 | **Knowledge Agent** (doc Q&A with citations) | E1 | E3 if multi-team | K18/K13 |
 | **Hybrid Agent** (answers + executes) | E1 + K5/K10/K15 | E2/E3/E4 by scale | Full kernel |
 | **Coding Agent** (PRs, CI, refactors) | E2, E4, sometimes E5 | E1 for docs | K7/K8 + K5 two-phase |
+| **Research testbed / benchmark harness** | **E6** | E2/E5 (method-dependent) | **K11/K12/K12a + K16-min** |
+
 
 **Rule of thumb:** Expand scope only when:
 1. Required by product promise, OR
@@ -1021,6 +1062,8 @@ schemas, control loop, tool executor, policy gate, verifiers, sandbox, audit/rep
 
 **Strategy modules (replaceable):**
 prompting style, planner type, RAG method, ranking approach, model provider, agent persona, UI layer.
+
+- **Testbed modules (NOT TCB):** scenario packs, environment adapters (sim/replay/live-sandbox), run harness (multi-seed, multi-run), scoring/judging, stats + reporting, dataset packaging/redaction for publication. These modules *consume* K11/K12/K16 artifacts but must not weaken kernel invariants.
 
 ---
 
@@ -1132,7 +1175,7 @@ class KernelRequest(BaseModel):
     tenant_id: str | None
     principal: str              # authenticated caller identity
     input: "SanitizedContent"   # K18 envelope
-    mode: Literal["live", "replay"] = "live"
+    mode: Literal["live", "record", "replay", "sim", "shadow"] = "live"
     bundle_id: str | None = None  # K16 bundle (optional in early levels)
 
 class KernelResponse(BaseModel):
@@ -1155,6 +1198,13 @@ class KernelRuntime(Protocol):
 - Strategy is injected, but cannot bypass enforcement (no tool handles are exposed to strategy).
     
 - `mode="replay"` MUST be side‑effect free (no write tools; no live external calls).
+
+- `mode in {"replay","sim"}` MUST be side-effect free (no write tools; no live external calls).
+
+- `mode="shadow"` MUST forbid commits (preview-only); it can be used to measure “what would happen” safely.
+
+- `mode="record"` MUST record model/tool I/O + approvals/decisions so the run can be replayed deterministically.
+
     
 
 ---

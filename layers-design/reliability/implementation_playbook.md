@@ -698,14 +698,30 @@ Example `contracts/importlinter.contracts.ini`:
 root_package = repo
 
 [contract:kernel_isolated]
-name = Kernel cannot import strategies or tool adapters
+name = Kernel cannot import strategies, tool adapters, or testbed
 type = forbidden
 source_modules =
     packages.kernel_tcb.src.kernel_tcb
 forbidden_modules =
     packages.strategies.src.strategies
     packages.tool_adapters.src.tool_adapters
+    packages.testbed.src.testbed
 ```
+
+---
+
+### 2.3 Add-on module: `testbed/` package (research harness, NOT TCB)
+
+If you plan to do publishable research, add a **separate** testbed module that depends on the kernel but is never depended on by it.
+
+Recommended shape:
+- `packages/testbed/` — scenario runner, environment adapters (sim/replay/live-sandbox), scoring, reporting, dataset packaging/redaction.
+- `benchmarks/` (or `policies/evals/benchmarks/`) — versioned scenario packs + suite cards (ties into K12/K12a).
+- `datasets/` (optional) — recorded trajectories for replay; storage manifests + redaction policies.
+
+Hard rule:
+- `kernel_tcb` MUST NOT import `testbed` (keep TCB small; keep research harness swappable).
+
 
 ---
 
@@ -1033,6 +1049,20 @@ Required suites (minimum):
 Exit criteria (Level 2 readiness):
 - you can replay a failing eval case deterministically (K11 becomes strongly recommended here).
 
+#### Step 8b — Testbed runner (research harness; strongly recommended if publishing)
+
+Deliverables:
+- run modes wired end-to-end (`record`/`replay`/`sim`/`shadow`), using the same KernelRuntime.
+- environment adapter registry (tool/model backends selectable per run).
+- scenario pack format + suite cards aligned with K12a (versioned, documented, flake policy).
+- artifact packager: trajectory + run summary + bundle_id + scenario IDs + seeds.
+
+Required tests:
+- `test_sim_mode_blocks_external_calls`
+- `test_shadow_mode_forbids_commit_even_if_approved`
+- `test_record_produces_replayable_trace`
+- `test_replay_is_deterministic_across_runs` (same bundle_id + seed)
+
 ---
 
 ### 4.2 From Level 2 → Level 3 action agent (writes)
@@ -1109,7 +1139,7 @@ class KernelRequest(BaseModel):
     tenant_id: str | None = None
 
     input: SanitizedContent
-    mode: Literal["live", "replay"] = "live"
+    mode: Literal["live", "record", "replay", "sim", "shadow"] = "live"
     bundle_id: str | None = None  # K16-min, optional in early prototypes
 
 class KernelResponse(BaseModel):
@@ -1132,6 +1162,12 @@ class KernelRuntime(Protocol):
     def resume(self, *, run_id: UUID) -> KernelResponse: ...
     def cancel(self, *, run_id: UUID, reason: str) -> None: ...
 ```
+
+Mode invariants (required for testbed correctness):
+- `replay`/`sim` are side-effect free: no live external calls; no write tools.
+- `shadow` is preview-only: commits are forbidden by policy/runtime.
+- `record` captures model/tool I/O + approvals/decisions so replay is deterministic.
+
 
 ### 5.2 Strategy port (typed proposals, not side effects)
 
